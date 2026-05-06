@@ -1,0 +1,27 @@
+/.idea
+.DS_Store
+*.elf
+*.bin
+*.dbg
+**/target/
+/.axconfig.*
+*.img
+/kernel-rv
+/kernel-la
+/.cargo
+/.crates*
+/mnt
+*.swp
+*.swo
+
+# temp
+*.log
+
+# workflow
+.codex/
+.agents/
+workflow/
+
+# target
+kernel-rv
+kernel-la
