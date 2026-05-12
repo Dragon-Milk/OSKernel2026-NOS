@@ -288,6 +288,44 @@ fn script_shell(path: &str) -> &'static str {
         .unwrap_or("/bin/sh")
 }
 
+fn busybox_for(path: &str) -> Option<&'static str> {
+    let candidates = if path.starts_with("/glibc/") {
+        ["/glibc/busybox", "/busybox", "/musl/busybox"]
+    } else if path.starts_with("/musl/") {
+        ["/musl/busybox", "/busybox", "/glibc/busybox"]
+    } else {
+        ["/busybox", "/musl/busybox", "/glibc/busybox"]
+    };
+
+    candidates
+        .into_iter()
+        .find(|path| FS_CONTEXT.lock().resolve(path).is_ok())
+}
+
+fn busybox_applet(path: &str) -> Option<(&'static str, &str)> {
+    if FS_CONTEXT.lock().resolve(path).is_ok() {
+        return None;
+    }
+
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if !matches!(name, "mkdir" | "rmdir" | "sleep") {
+        return None;
+    }
+
+    let context = if path.starts_with('/') && !path.starts_with("/bin/") {
+        path.to_owned()
+    } else {
+        FS_CONTEXT
+            .lock()
+            .current_dir()
+            .absolute_path()
+            .map(|path| path.to_string())
+            .unwrap_or_else(|_| path.to_owned())
+    };
+
+    busybox_for(&context).map(|busybox| (busybox, name))
+}
+
 fn shell_args(shell: &str, path: String, args: &[String]) -> Vec<String> {
     let mut new_args = Vec::with_capacity(args.len() + 2);
     new_args.push(shell.to_owned());
@@ -349,6 +387,13 @@ pub fn load_user_app(
     if path.ends_with(".sh") {
         let path = script_path(path);
         let new_args = shell_args(script_shell(&path), path, args);
+        return load_user_app(uspace, None, &new_args, envs);
+    }
+    if let Some((busybox, applet)) = busybox_applet(path) {
+        let mut new_args = Vec::with_capacity(args.len() + 2);
+        new_args.push(busybox.to_owned());
+        new_args.push(applet.to_owned());
+        new_args.extend(args.iter().skip(1).cloned());
         return load_user_app(uspace, None, &new_args, envs);
     }
 

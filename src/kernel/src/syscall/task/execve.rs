@@ -58,10 +58,13 @@ pub fn sys_execve(
         load_user_app(&mut aspace, Some(path.as_str()), &args, &envs)?;
     drop(aspace);
 
-    let loc = FS_CONTEXT.lock().resolve(&path)?;
-    curr.set_name(loc.name());
-
-    *proc_data.exe_path.write() = loc.absolute_path()?.to_string();
+    if let Ok(loc) = FS_CONTEXT.lock().resolve(&path) {
+        curr.set_name(loc.name());
+        *proc_data.exe_path.write() = loc.absolute_path()?.to_string();
+    } else {
+        curr.set_name(path.rsplit('/').next().unwrap_or(&path));
+        *proc_data.exe_path.write() = path.to_string();
+    }
     *proc_data.cmdline.write() = Arc::new(args);
 
     proc_data.set_heap_top(USER_HEAP_BASE);
