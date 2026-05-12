@@ -1,5 +1,7 @@
 # Config generation
 
+PYTHON ?= python3
+
 config_args := \
   defconfig.toml $(PLAT_CONFIG) $(EXTRA_CONFIG) \
   -w 'arch="$(ARCH)"' \
@@ -7,7 +9,7 @@ config_args := \
   -o "$(OUT_CONFIG)"
 
 ifneq ($(MEM),)
-  config_args += -w 'plat.phys-memory-size=$(shell ./strtosz.py $(MEM))'
+  config_args += -w 'plat.phys-memory-size=$(shell $(PYTHON) ./strtosz.py $(MEM))'
 else
   MEM := $(shell $(AXCONFIG_GEN) $(PLAT_CONFIG) -r plat.phys-memory-size 2>/dev/null | tr -d _ | xargs printf "%dB")
 endif

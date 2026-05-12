@@ -1,6 +1,11 @@
 //! User address space management.
 
-use alloc::{borrow::ToOwned, string::String, vec, vec::Vec};
+use alloc::{
+    borrow::ToOwned,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 use core::{ffi::CStr, iter};
 
 use axerrno::{AxError, AxResult};
@@ -218,7 +223,8 @@ impl ElfLoader {
         };
 
         let (elf, ldso) = if let Some(ldso) = ldso {
-            let loc = FS_CONTEXT.lock().resolve(ldso)?;
+            let ldso = interp_path(path, &ldso);
+            let loc = FS_CONTEXT.lock().resolve(&ldso)?;
             if !self.0.touch(|e| e.borrow_cache().location().ptr_eq(&loc)) {
                 let e = ElfCacheEntry::load(loc)?.map_err(|_| AxError::InvalidInput)?;
                 self.0.insert(e);
@@ -258,6 +264,66 @@ pub fn clear_elf_cache() {
     ELF_LOADER.lock().0.clear();
 }
 
+fn script_path(path: &str) -> String {
+    FS_CONTEXT
+        .lock()
+        .resolve(path)
+        .and_then(|loc| loc.absolute_path())
+        .map(|path| path.to_string())
+        .unwrap_or_else(|_| path.to_owned())
+}
+
+fn script_shell(path: &str) -> &'static str {
+    let candidates = if path.starts_with("/glibc/") {
+        ["/glibc/busybox", "/busybox", "/bin/sh", "/musl/busybox"]
+    } else if path.starts_with("/musl/") {
+        ["/musl/busybox", "/busybox", "/bin/sh", "/glibc/busybox"]
+    } else {
+        ["/busybox", "/bin/sh", "/musl/busybox", "/glibc/busybox"]
+    };
+
+    candidates
+        .into_iter()
+        .find(|path| FS_CONTEXT.lock().resolve(path).is_ok())
+        .unwrap_or("/bin/sh")
+}
+
+fn shell_args(shell: &str, path: String, args: &[String]) -> Vec<String> {
+    let mut new_args = Vec::with_capacity(args.len() + 2);
+    new_args.push(shell.to_owned());
+    if shell.ends_with("/busybox") {
+        new_args.push("sh".to_owned());
+    }
+    new_args.push(path);
+    new_args.extend(args.iter().skip(1).cloned());
+    new_args
+}
+
+fn interp_path(app_path: &str, interp: &str) -> String {
+    if FS_CONTEXT.lock().resolve(interp).is_ok() {
+        return interp.to_owned();
+    }
+    if !interp.starts_with("/lib/") {
+        return interp.to_owned();
+    }
+
+    let prefixes = if app_path.starts_with("/glibc/") {
+        ["/glibc", "/musl"]
+    } else {
+        ["/musl", "/glibc"]
+    };
+
+    prefixes
+        .into_iter()
+        .map(|prefix| {
+            let mut path = prefix.to_owned();
+            path.push_str(interp);
+            path
+        })
+        .find(|path| FS_CONTEXT.lock().resolve(path).is_ok())
+        .unwrap_or_else(|| interp.to_owned())
+}
+
 /// Load the user app to the user address space.
 ///
 /// # Arguments
@@ -281,9 +347,8 @@ pub fn load_user_app(
 
     // FIXME: impl `/proc/self/exe` to let busybox retry running
     if path.ends_with(".sh") {
-        let new_args: Vec<String> = iter::once("/bin/sh".to_owned())
-            .chain(args.iter().cloned())
-            .collect();
+        let path = script_path(path);
+        let new_args = shell_args(script_shell(&path), path, args);
         return load_user_app(uspace, None, &new_args, envs);
     }
 
@@ -295,13 +360,19 @@ pub fn load_user_app(
                 let pos = head.iter().position(|c| *c == b'\n').unwrap_or(head.len());
                 let line = core::str::from_utf8(&head[..pos]).map_err(|_| AxError::InvalidInput)?;
 
-                let new_args: Vec<String> = line
+                let mut new_args: Vec<String> = line
                     .trim()
                     .splitn(2, |c: char| c.is_ascii_whitespace())
                     .map(|s| s.trim_ascii().to_owned())
                     .chain(iter::once(path.to_owned()))
                     .chain(args.iter().skip(1).cloned())
                     .collect();
+                if new_args.first().is_some_and(|arg| arg == "/bin/sh")
+                    && FS_CONTEXT.lock().resolve("/bin/sh").is_err()
+                {
+                    let path = script_path(path);
+                    new_args = shell_args(script_shell(&path), path, args);
+                }
                 return load_user_app(uspace, None, &new_args, envs);
             }
             return Err(AxError::InvalidExecutable);
