@@ -2,6 +2,8 @@
 
 include cargo.mk
 
+BASH ?= bash
+
 ifeq ($(APP_TYPE), c)
   include build_c.mk
 else
@@ -59,7 +61,7 @@ $(OUT_DIR):
 
 _dwarf: $(OUT_ELF)
 ifeq ($(DWARF), y)
-	$(call run_cmd,./dwarf.sh,$(OUT_ELF) $(OBJCOPY))
+	$(call run_cmd,$(BASH),./dwarf.sh $(OUT_ELF) $(OBJCOPY))
 endif
 
 $(OUT_BIN): _cargo_build $(OUT_ELF) _dwarf
