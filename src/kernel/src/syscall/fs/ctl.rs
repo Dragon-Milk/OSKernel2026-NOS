@@ -94,8 +94,11 @@ pub fn sys_mkdirat(dirfd: i32, path: *const c_char, mode: u32) -> AxResult<isize
     let mode = NodePermission::from_bits_truncate(mode as u16);
 
     with_fs(dirfd, |fs| {
-        fs.create_dir(path, mode)?;
-        Ok(0)
+    if fs.resolve(&path).is_ok() {
+        return Err(AxError::AlreadyExists);
+    }
+    fs.create_dir(path, mode)?;
+    Ok(0)
     })
 }
 
