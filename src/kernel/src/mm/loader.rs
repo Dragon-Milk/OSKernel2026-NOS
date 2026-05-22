@@ -1,6 +1,7 @@
 //! User address space management.
 
 use alloc::{
+    format,
     borrow::ToOwned,
     string::{String, ToString},
     vec,
@@ -351,15 +352,22 @@ fn interp_path(app_path: &str, interp: &str) -> String {
         ["/musl", "/glibc"]
     };
 
-    prefixes
-        .into_iter()
-        .map(|prefix| {
-            let mut path = prefix.to_owned();
-            path.push_str(interp);
-            path
-        })
-        .find(|path| FS_CONTEXT.lock().resolve(path).is_ok())
-        .unwrap_or_else(|| interp.to_owned())
+    for prefix in prefixes {
+        let mut path = prefix.to_owned();
+        path.push_str(interp);
+        if FS_CONTEXT.lock().resolve(&path).is_ok() {
+            return path;
+        }
+
+        if interp.starts_with("/lib/ld-musl-") {
+            let libc = format!("{prefix}/lib/libc.so");
+            if FS_CONTEXT.lock().resolve(&libc).is_ok() {
+                return libc;
+            }
+        }
+    }
+
+    interp.to_owned()
 }
 
 /// Load the user app to the user address space.
