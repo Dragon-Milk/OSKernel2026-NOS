@@ -1,4 +1,4 @@
-use alloc::{format, string::ToString, sync::Arc};
+use alloc::{format, string::{String, ToString}, sync::Arc};
 use core::{
     ffi::{c_char, c_int},
     mem,
@@ -108,6 +108,29 @@ fn add_to_fd(result: OpenResult, flags: u32) -> AxResult<i32> {
     add_file_like(f, flags & O_CLOEXEC != 0)
 }
 
+fn remap_abi_lib_path(path: &str) -> Option<String> {
+    if !path.starts_with("/lib/") && !path.starts_with("/usr/lib/") {
+        return None;
+    }
+
+    let curr = current();
+    let exe_path = curr.as_thread().proc_data.exe_path.read();
+
+    let prefix = if exe_path.starts_with("/glibc/") {
+        "/glibc"
+    } else if exe_path.starts_with("/musl/") {
+        "/musl"
+    } else {
+        return None;
+    };
+
+    let mapped = format!("{prefix}{path}");
+    if FS_CONTEXT.lock().resolve(&mapped).is_ok() {
+        Some(mapped)
+    } else {
+        None
+    }
+}
 /// Open or create a file.
 /// fd: file descriptor
 /// filename: file path to be opened or created
@@ -126,7 +149,18 @@ pub fn sys_openat(
     let mode = mode & !current().as_thread().proc_data.umask();
 
     let options = flags_to_options(flags, mode, (sys_geteuid()? as _, sys_getegid()? as _));
-    with_fs(dirfd, |fs| options.open(fs, path))
+
+    let result = with_fs(dirfd, |fs| options.open(fs, path.as_str())).or_else(|err| {
+        if matches!(err, AxError::NotFound) {
+            if let Some(mapped) = remap_abi_lib_path(&path) {
+                debug!("sys_openat remap abi lib: {path:?} -> {mapped:?}");
+                return with_fs(dirfd, |fs| options.open(fs, mapped.as_str()));
+            }
+        }
+        Err(err)
+    });
+
+    result
         .and_then(|it| add_to_fd(it, flags as _))
         .map(|fd| fd as isize)
 }
