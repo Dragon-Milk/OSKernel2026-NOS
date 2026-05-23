@@ -31,6 +31,10 @@ LA_ELF := $(APP_NAME)_loongarch64-qemu-virt.elf
 RV_LD_SCRIPT := $(CURDIR)/make/linker_riscv64-qemu-virt-contest.lds
 LA_LD_SCRIPT := $(CURDIR)/make/linker_loongarch64-qemu-contest.lds
 
+ifeq ($(ARCH),loongarch64)
+export LD_SCRIPT := $(LA_LD_SCRIPT)
+endif
+
 all: kernel-rv kernel-la
 
 kernel-rv:

@@ -39,7 +39,10 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                                 .expect("Failed to send SIGSEGV");
                         }
                     }
-                    ReturnReason::Interrupt => {}
+                    ReturnReason::Interrupt => {
+                        #[cfg(target_arch = "loongarch64")]
+                        axtask::yield_now();
+                    }
                     #[allow(unused_labels)]
                     ReturnReason::Exception(exc_info) => 'exc: {
                         // TODO: detailed handling
