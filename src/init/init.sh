@@ -47,7 +47,7 @@ run_test_dir() {
 cd /
 found=0
 
-for dir in / /musl /glibc; do
+for dir in / /glibc /musl; do
     run_test_dir "$dir"
 done
 
