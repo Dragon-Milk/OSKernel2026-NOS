@@ -1,8 +1,8 @@
 //! User address space management.
 
 use alloc::{
-    format,
     borrow::ToOwned,
+    format,
     string::{String, ToString},
     vec,
     vec::Vec,
@@ -198,9 +198,6 @@ impl ElfLoader {
             }
         }
 
-        uspace.clear();
-        map_trampoline(uspace)?;
-
         let entry = self.0.front().unwrap();
         let ldso = if let Some(header) = entry
             .borrow_elf()
@@ -238,6 +235,9 @@ impl ElfLoader {
         } else {
             (entry, None)
         };
+
+        uspace.clear();
+        map_trampoline(uspace)?;
 
         let elf = map_elf(uspace, crate::config::USER_SPACE_BASE, elf)?;
         let ldso = ldso
@@ -342,7 +342,11 @@ fn interp_path(app_path: &str, interp: &str) -> String {
     if FS_CONTEXT.lock().resolve(interp).is_ok() {
         return interp.to_owned();
     }
-    if !interp.starts_with("/lib/") {
+    if !(interp.starts_with("/lib/")
+        || interp.starts_with("/lib64/")
+        || interp.starts_with("/usr/lib/")
+        || interp.starts_with("/usr/lib64/"))
+    {
         return interp.to_owned();
     }
 
@@ -352,6 +356,7 @@ fn interp_path(app_path: &str, interp: &str) -> String {
         ["/musl", "/glibc"]
     };
 
+    let interp_name = interp.rsplit('/').next().unwrap_or(interp);
     for prefix in prefixes {
         let mut path = prefix.to_owned();
         path.push_str(interp);
@@ -359,7 +364,12 @@ fn interp_path(app_path: &str, interp: &str) -> String {
             return path;
         }
 
-        if interp.starts_with("/lib/ld-musl-") {
+        let path = format!("{prefix}/lib/{interp_name}");
+        if FS_CONTEXT.lock().resolve(&path).is_ok() {
+            return path;
+        }
+
+        if interp_name.starts_with("ld-musl-") || interp_name.starts_with("ld-linux-") {
             let libc = format!("{prefix}/lib/libc.so");
             if FS_CONTEXT.lock().resolve(&libc).is_ok() {
                 return libc;

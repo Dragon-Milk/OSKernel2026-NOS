@@ -2,10 +2,7 @@ use alloc::vec::Vec;
 use core::{future::poll_fn, task::Poll};
 
 use axerrno::{AxError, AxResult, LinuxError};
-use axtask::{
-    current,
-    future::{block_on, interruptible},
-};
+use axtask::{current, future::block_on};
 use bitflags::bitflags;
 use linux_raw_sys::general::{
     __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
@@ -105,13 +102,18 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isiz
         }
     };
 
-    block_on(interruptible(poll_fn(|cx| {
-        match check_children().transpose() {
-            Some(res) => Poll::Ready(res),
-            None => {
-                proc_data.child_exit_event.register(cx.waker());
+    block_on(poll_fn(|cx| match check_children().transpose() {
+        Some(res) => Poll::Ready(res),
+        None => {
+            proc_data.child_exit_event.register(cx.waker());
+            if curr.poll_interrupt(cx).is_ready() {
+                match check_children().transpose() {
+                    Some(res) => Poll::Ready(res),
+                    None => Poll::Ready(Err(AxError::Interrupted)),
+                }
+            } else {
                 Poll::Pending
             }
         }
-    })))?
+    }))
 }
