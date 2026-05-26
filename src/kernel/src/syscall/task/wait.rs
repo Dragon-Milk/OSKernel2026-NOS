@@ -4,7 +4,7 @@ use core::{future::poll_fn, task::Poll};
 use axerrno::{AxError, AxResult, LinuxError};
 use axtask::{
     current,
-    future::{block_on, interruptible},
+    future::{block_on},
 };
 use bitflags::bitflags;
 use linux_raw_sys::general::{
@@ -105,7 +105,7 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isiz
         }
     };
 
-    block_on(interruptible(poll_fn(|cx| {
+    block_on(poll_fn(|cx| {
         match check_children().transpose() {
             Some(res) => Poll::Ready(res),
             None => {
@@ -113,5 +113,5 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isiz
                 Poll::Pending
             }
         }
-    })))?
+    }))
 }
