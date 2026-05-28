@@ -4,6 +4,9 @@ export HOME=/root
 export USER=root
 export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 
+# Set SKIP_LTP=0 to run the original ltp_testcode.sh scripts again.
+SKIP_LTP=${SKIP_LTP:-1}
+
 run_with_shell() {
     script="$1"
 
@@ -18,6 +21,24 @@ run_with_shell() {
     else
         sh "$script"
     fi
+}
+
+skip_ltp_testcase() {
+    name="$1"
+    dir="$2"
+
+    [ "$SKIP_LTP" = "1" ] || return 1
+    [ "$name" = "ltp_testcode.sh" ] || return 1
+
+    case "$dir" in
+        /glibc) group="ltp-glibc" ;;
+        /musl) group="ltp-musl" ;;
+        *) group="ltp" ;;
+    esac
+
+    echo "#### OS COMP TEST GROUP START $group ####"
+    echo "#### OS COMP TEST GROUP END $group ####"
+    return 0
 }
 
 run_test_dir() {
@@ -38,6 +59,9 @@ run_test_dir() {
         [ -f "$testcase" ] || continue
         found=1
         echo "run ${dir}/${testcase#./}"
+        if skip_ltp_testcase "${testcase#./}" "$dir"; then
+            continue
+        fi
         run_with_shell "$testcase"
     done
 
@@ -59,6 +83,10 @@ if [ "$found" -eq 0 ]; then
         name="${testcase##*/}"
         cd "$dir" || continue
         echo "run ${dir}/${name}"
+        if skip_ltp_testcase "$name" "$dir"; then
+            cd /
+            continue
+        fi
         run_with_shell "./$name"
         cd /
     done
