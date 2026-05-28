@@ -350,6 +350,7 @@ fn interp_path(app_path: &str, interp: &str) -> String {
         return interp.to_owned();
     }
 
+    let app_path = script_path(app_path);
     let prefixes = if app_path.starts_with("/glibc/") {
         ["/glibc", "/musl"]
     } else {

@@ -41,11 +41,21 @@ skip_ltp_testcase() {
     return 0
 }
 
+set_library_path() {
+    case "$1" in
+        /glibc|/glibc/*) export LD_LIBRARY_PATH=/glibc/lib ;;
+        /musl|/musl/*) export LD_LIBRARY_PATH=/musl/lib ;;
+        *) unset LD_LIBRARY_PATH ;;
+    esac
+}
+
 run_test_dir() {
     dir="$1"
 
     [ -d "$dir" ] || return
     cd "$dir" || return
+
+    set_library_path "$dir"
 
     if [ -f ./test_all.sh ]; then
         found=1
@@ -82,6 +92,7 @@ if [ "$found" -eq 0 ]; then
         dir="${testcase%/*}"
         name="${testcase##*/}"
         cd "$dir" || continue
+        set_library_path "$dir"
         echo "run ${dir}/${name}"
         if skip_ltp_testcase "$name" "$dir"; then
             cd /
