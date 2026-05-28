@@ -21,6 +21,7 @@
 # workflow
 .codex/
 .agents/
+.claude/
 workflow/
 
 # target
