@@ -79,36 +79,49 @@ run_test_dir() {
 }
 
 cd /
-found=0
 
-for dir in / /glibc /musl; do
-    run_test_dir "$dir"
-done
+# ============================================================
+# Single test mode: uncomment one of the lines below to run a
+# specific test instead of the full suite.
+# ============================================================
 
-if [ "$found" -eq 0 ]; then
-    for testcase in /*_testcode.sh /scripts/*/*_testcode.sh; do
-        [ -f "$testcase" ] || continue
-        found=1
-        dir="${testcase%/*}"
-        name="${testcase##*/}"
-        cd "$dir" || continue
-        set_library_path "$dir"
-        echo "run ${dir}/${name}"
-        if skip_ltp_testcase "$name" "$dir"; then
-            cd /
-            continue
-        fi
-        run_with_shell "./$name"
-        cd /
-    done
-fi
+# --- basic tests (test_sleep, test_getpid, etc.) ---
+# set_library_path /glibc && cd /glibc && run_with_shell ./basic_testcode.sh
 
-if [ "$found" -eq 0 ]; then
-    echo "No OS competition test scripts found; starting interactive shell."
-    if [ -x /busybox ]; then
-        exec /busybox sh
-    fi
-    exec sh --login
-fi
+# --- busybox tests ---
+# set_library_path /glibc && cd /glibc && run_with_shell ./busybox_testcode.sh
+
+# --- cyclictest only (NO_STRESS + STRESS) ---
+ set_library_path /glibc && cd /glibc && run_with_shell ./cyclictest_testcode.sh
+
+# --- full test suite (comment out the single test above) ---
+# found=0
+# for dir in / /glibc /musl; do
+#     run_test_dir "$dir"
+# done
+# if [ "$found" -eq 0 ]; thenS
+#     for testcase in /*_testcode.sh /scripts/*/*_testcode.sh; do
+#         [ -f "$testcase" ] || continue
+#         found=1
+#         dir="${testcase%/*}"
+#         name="${testcase##*/}"
+#         cd "$dir" || continue
+#         set_library_path "$dir"
+#         echo "run ${dir}/${name}"
+#         if skip_ltp_testcase "$name" "$dir"; then
+#             cd /
+#             continue
+#         fi
+#         run_with_shell "./$name"
+#         cd /
+#     done
+# fi
+# if [ "$found" -eq 0 ]; then
+#     echo "No OS competition test scripts found; starting interactive shell."
+#     if [ -x /busybox ]; then
+#         exec /busybox sh
+#     fi
+#     exec sh --login
+# fi
 
 exit 0

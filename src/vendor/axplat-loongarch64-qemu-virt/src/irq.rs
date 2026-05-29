@@ -147,6 +147,16 @@ impl IrqIf for IrqIfImpl {
             irq = IrqType::Ex(ex_irq);
         }
 
+        // Clear the timer interrupt BEFORE calling the handler.  If the
+        // handler re-arms the one-shot countdown timer and the timer
+        // fires again while the handler does post-tick work
+        // (on_timer_tick / check_timer_events), the new interrupt
+        // stays pending and will be serviced after ertn.
+        // Clearing AFTER the handler would lose that new interrupt.
+        if matches!(irq, IrqType::Timer) {
+            ticlr::clear_timer_interrupt();
+        }
+
         trace!("IRQ {irq:?}");
 
         if let IrqType::Ipi = irq {
@@ -170,9 +180,6 @@ impl IrqIf for IrqIfImpl {
         }
 
         match irq {
-            IrqType::Timer => {
-                ticlr::clear_timer_interrupt();
-            }
             IrqType::Ex(irq) => {
                 eiointc::complete_irq(irq);
             }

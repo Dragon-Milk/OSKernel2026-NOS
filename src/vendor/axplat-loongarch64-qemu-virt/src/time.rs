@@ -11,8 +11,15 @@ pub(super) fn init_percpu() {
     #[cfg(feature = "irq")]
     {
         use loongArch64::register::tcfg;
-        tcfg::set_init_val(0);
-        tcfg::set_periodic(false);
+        // Use periodic mode with a 1ms interval. The timer auto-reloads
+        // from InitVal each time the counter reaches 0 and never stops.
+        // This eliminates the need for the En toggle in set_oneshot_timer,
+        // avoiding a QEMU race where set_en(false) can clear a pending
+        // timer interrupt and permanently stop the one-shot timer.
+        let timer_freq = loongArch64::time::get_timer_freq() as u64;
+        let ticks_per_ms = timer_freq / 1000; // TICKS_PER_SEC = 1000
+        tcfg::set_periodic(true);
+        tcfg::set_init_val(ticks_per_ms as _);
         tcfg::set_en(true);
         axplat::irq::set_enable(crate::config::devices::TIMER_IRQ, true);
     }
@@ -127,8 +134,18 @@ impl TimeIf for TimeIfImpl {
 
         let ticks_now = Self::current_ticks();
         let ticks_deadline = Self::nanos_to_ticks(deadline_ns);
-        let init_value = ticks_deadline - ticks_now;
+        // In periodic mode the timer never stops — it auto-reloads from
+        // InitVal each time the counter reaches 0. Simply update InitVal;
+        // the new value takes effect on the next auto-reload. No En toggle
+        // is needed, avoiding the race where set_en(false) could clear a
+        // pending timer interrupt in QEMU and permanently stop a one-shot
+        // timer.
+        const MIN_INIT_VAL: u64 = 1000;
+        let init_value = if ticks_deadline > ticks_now {
+            (ticks_deadline - ticks_now).max(MIN_INIT_VAL)
+        } else {
+            MIN_INIT_VAL
+        };
         tcfg::set_init_val(init_value as _);
-        tcfg::set_en(true);
     }
 }

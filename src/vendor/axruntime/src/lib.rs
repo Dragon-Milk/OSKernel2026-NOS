@@ -376,6 +376,15 @@ fn init_interrupt() {
         axipi::ipi_handler();
     });
 
+    // Program the first timer tick before enabling IRQs.
+    // On platforms with countdown timers (e.g. LoongArch), the timer must be
+    // explicitly started after the handler is registered. On RISC-V this is a
+    // no-op because set_timer(0) was already called in init_percpu() and the
+    // pending interrupt will fire when IRQs are enabled.
+    let now_ns = axhal::time::monotonic_time_nanos();
+    unsafe { NEXT_DEADLINE.write_current_raw(now_ns + PERIODIC_INTERVAL_NANOS * 2) };
+    axhal::time::set_oneshot_timer(now_ns + PERIODIC_INTERVAL_NANOS);
+
     // Enable IRQs before starting app
     axhal::asm::enable_irqs();
 }
