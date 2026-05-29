@@ -15,7 +15,10 @@ use axtask::future::{block_on, poll_io};
 use linux_raw_sys::general::{AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW};
 
 use super::{FileLike, Kstat, get_file_like};
-use crate::file::{IoDst, IoSrc};
+use crate::{
+    file::{IoDst, IoSrc},
+    mm::busybox_applet,
+};
 
 pub fn with_fs<R>(dirfd: c_int, f: impl FnOnce(&mut FsContext) -> AxResult<R>) -> AxResult<R> {
     let mut fs = FS_CONTEXT.lock();
@@ -64,14 +67,34 @@ pub fn resolve_at(dirfd: c_int, path: Option<&str>, flags: u32) -> AxResult<Reso
                 ResolveAtResult::Other(file_like)
             })
         }
-        Some(path) => with_fs(dirfd, |fs| {
-            if flags & AT_SYMLINK_NOFOLLOW != 0 {
-                fs.resolve_no_follow(path)
+        Some(path) => {
+            let busybox = if dirfd == AT_FDCWD || path.starts_with('/') {
+                busybox_applet(path).map(|(busybox, _)| busybox)
             } else {
-                fs.resolve(path)
-            }
-            .map(ResolveAtResult::File)
-        }),
+                None
+            };
+
+            with_fs(dirfd, |fs| {
+                let resolved = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+                    fs.resolve_no_follow(path)
+                } else {
+                    fs.resolve(path)
+                };
+
+                match resolved {
+                    Ok(loc) => Ok(ResolveAtResult::File(loc)),
+                    Err(err) => {
+                        if err == AxError::NotFound
+                            && let Some(busybox) = busybox
+                        {
+                            fs.resolve(busybox).map(ResolveAtResult::File)
+                        } else {
+                            Err(err)
+                        }
+                    }
+                }
+            })
+        }
     }
 }
 

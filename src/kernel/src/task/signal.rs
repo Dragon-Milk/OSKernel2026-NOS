@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use axerrno::{AxError, AxResult};
 use axhal::uspace::UserContext;
 use axtask::{TaskInner, current};
-use starry_process::Pid;
+use starry_process::{Pid, Process, init_proc};
 use starry_signal::{SignalInfo, SignalOSAction, SignalSet};
 
 use super::{AsThread, Thread, do_exit, get_process_data, get_process_group, get_task};
@@ -71,6 +71,15 @@ pub(super) fn send_signal_thread_inner(task: &TaskInner, thr: &Thread, sig: Sign
     }
 }
 
+fn process_tree_contains(proc: &Process, pid: Pid) -> bool {
+    if proc.pid() == pid {
+        return true;
+    }
+    proc.children()
+        .iter()
+        .any(|child| process_tree_contains(child, pid))
+}
+
 /// Sends a signal to a thread.
 pub fn send_signal_to_thread(tgid: Option<Pid>, tid: Pid, sig: Option<SignalInfo>) -> AxResult<()> {
     let task = get_task(tid)?;
@@ -89,7 +98,11 @@ pub fn send_signal_to_thread(tgid: Option<Pid>, tid: Pid, sig: Option<SignalInfo
 
 /// Sends a signal to a process.
 pub fn send_signal_to_process(pid: Pid, sig: Option<SignalInfo>) -> AxResult<()> {
-    let proc_data = get_process_data(pid)?;
+    let proc_data = match get_process_data(pid) {
+        Ok(proc_data) => proc_data,
+        Err(AxError::NoSuchProcess) if process_tree_contains(&init_proc(), pid) => return Ok(()),
+        Err(err) => return Err(err),
+    };
 
     if let Some(sig) = sig {
         let signo = sig.signo();

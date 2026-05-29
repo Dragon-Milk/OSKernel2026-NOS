@@ -303,13 +303,13 @@ fn busybox_for(path: &str) -> Option<&'static str> {
         .find(|path| FS_CONTEXT.lock().resolve(path).is_ok())
 }
 
-fn busybox_applet(path: &str) -> Option<(&'static str, &str)> {
+pub(crate) fn busybox_applet(path: &str) -> Option<(&'static str, &str)> {
     if FS_CONTEXT.lock().resolve(path).is_ok() {
         return None;
     }
 
     let name = path.rsplit('/').next().unwrap_or(path);
-    if !matches!(name, "mkdir" | "rmdir" | "sleep") {
+    if !matches!(name, "kill" | "ls" | "mkdir" | "rmdir" | "sleep" | "which") {
         return None;
     }
 
