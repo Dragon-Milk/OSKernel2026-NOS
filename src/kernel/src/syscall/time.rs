@@ -43,7 +43,7 @@ pub fn sys_clock_getres(clock_id: __kernel_clockid_t, res: *mut timespec) -> AxR
         warn!("Called sys_clock_getres for unsupported clock {clock_id}");
     }
     if let Some(res) = res.nullable() {
-        res.vm_write(timespec::from_time_value(TimeValue::from_micros(1)))?;
+        res.vm_write(timespec::from_time_value(TimeValue::from_nanos(1)))?;
     }
     Ok(0)
 }

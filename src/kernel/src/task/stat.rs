@@ -1,3 +1,5 @@
+use axhal::time::nanos_to_ticks;
+
 use alloc::{borrow::ToOwned, fmt, string::String};
 
 use axerrno::AxResult;
@@ -84,6 +86,9 @@ impl TaskStat {
         let ppid = proc.parent().map_or(0, |p| p.pid());
         let pgrp = proc.group().pgid();
         let session = proc.group().session().sid();
+        let (utime, stime) = thread.time.borrow().output();
+        let utime = nanos_to_ticks(utime.as_nanos() as u64);
+        let stime = nanos_to_ticks(stime.as_nanos() as u64);
         Ok(Self {
             pid,
             comm: comm.to_owned(),
@@ -94,6 +99,8 @@ impl TaskStat {
             num_threads: proc.threads().len() as u32,
             exit_signal: proc_data.exit_signal.unwrap_or(Signo::SIGCHLD) as u8,
             exit_code: proc.exit_code(),
+            utime,
+            stime,
             ..Default::default()
         })
     }
