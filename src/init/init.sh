@@ -89,23 +89,10 @@ run_with_shell() {
     fi
 }
 
-# 安装所有 busybox applet 到 /bin，避免 "xxx: not found" 错误
-/glibc/busybox mkdir -p /bin
-for cmd in $(/glibc/busybox --list); do
-    /glibc/busybox ln -s /glibc/busybox /bin/$cmd
-done
-
-# UnixBench 需要 sort.src（复制 unixbench_testcode.sh 充当）
-/glibc/busybox cp /glibc/unixbench_testcode.sh /glibc/sort.src
-
-# 跳过辅助程序/脚本（死循环/需外部信号控制，非独立测试）
-/glibc/busybox rm -f /glibc/ltp/testcases/bin/cgroup_fj_proc
-/glibc/busybox rm -f /glibc/ltp/testcases/bin/cgroup_regression_*.sh
-/glibc/busybox rm -f /glibc/ltp/testcases/bin/cgroup_regression_fork_processes
 
 cd /glibc
-echo "run /glibc/ltp_testcode.sh"
-run_with_shell ./ltp_testcode.sh
+echo "run /glibc/cyclictest.sh"
+run_with_shell ./cyclictest.sh
 
 # 完成后进入 shell
 exec /glibc/busybox sh
