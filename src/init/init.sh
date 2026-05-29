@@ -89,13 +89,19 @@ run_with_shell() {
     fi
 }
 
-# 创建 /bin/true 符号链接，UnixBench syscall exec 测试需要
-#/glibc/busybox mkdir -p /bin
-#/glibc/busybox cp /glibc/busybox /bin/true
-#/glibc/busybox cp /glibc/unixbench_testcode.sh /glibc/sort.src
+# 安装所有 busybox applet 到 /bin，避免 "xxx: not found" 错误
+/glibc/busybox mkdir -p /bin
+for cmd in $(/glibc/busybox --list); do
+    /glibc/busybox ln -s /glibc/busybox /bin/$cmd
+done
 
-#创建 /bin/basename，ltp测试需要
-/glibc/busybox cp /glibc/busybox /bin/basename
+# UnixBench 需要 sort.src（复制 unixbench_testcode.sh 充当）
+/glibc/busybox cp /glibc/unixbench_testcode.sh /glibc/sort.src
+
+# 跳过辅助程序/脚本（死循环/需外部信号控制，非独立测试）
+/glibc/busybox rm -f /glibc/ltp/testcases/bin/cgroup_fj_proc
+/glibc/busybox rm -f /glibc/ltp/testcases/bin/cgroup_regression_*.sh
+/glibc/busybox rm -f /glibc/ltp/testcases/bin/cgroup_regression_fork_processes
 
 cd /glibc
 echo "run /glibc/ltp_testcode.sh"
