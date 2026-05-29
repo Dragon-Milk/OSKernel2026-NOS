@@ -91,8 +91,8 @@ run_with_shell() {
 
 
 cd /glibc
-echo "run /glibc/cyclictest.sh"
-run_with_shell ./cyclictest.sh
+echo "run /glibc/cyclictest_testcode.sh"
+run_with_shell ./cyclictest_testcode.sh
 
 # 完成后进入 shell
 exec /glibc/busybox sh

@@ -15,7 +15,7 @@ use super::{
     AddrSpace, Backend, BackendOps, PopulateCallback, alloc_frame, dealloc_frame, pages_in,
 };
 
-struct FrameRefCnt(u8);
+struct FrameRefCnt(u16);
 
 impl FrameRefCnt {
     // This function may lock FRAME_TABLE again, so the caller should drop the lock first.
@@ -39,7 +39,7 @@ struct FrameTableRefCount {
 }
 
 impl FrameTableRefCount {
-    const INITIAL_CNT: u8 = 1;
+    const INITIAL_CNT: u16 = 1;
 
     const fn new() -> Self {
         Self {
@@ -249,7 +249,7 @@ impl BackendOps for CowBackend {
                     let mut frame = frame.lock();
                     assert!(frame.0 > 0, "referencing unreferenced frame");
                     frame.0 += 1;
-                    if frame.0 == u8::MAX {
+                    if frame.0 == u16::MAX {
                         warn!("frame reference count overflow");
                         return Err(AxError::BadAddress);
                     }
