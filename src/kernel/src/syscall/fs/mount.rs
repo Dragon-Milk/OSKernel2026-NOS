@@ -17,7 +17,7 @@ pub fn sys_mount(
     let fs_type = vm_load_string(fs_type)?;
     debug!("sys_mount <= source: {source:?}, target: {target:?}, fs_type: {fs_type:?}");
 
-    if fs_type != "tmpfs" {
+    if !matches!(fs_type.as_str(), "tmpfs" | "vfat") {
         return Err(AxError::NoSuchDevice);
     }
 
