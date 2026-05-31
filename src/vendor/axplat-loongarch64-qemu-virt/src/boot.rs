@@ -15,6 +15,9 @@ static mut BOOT_PT_L1: Aligned4K<[LA64PTE; 512]> = Aligned4K::new([LA64PTE::empt
 #[unsafe(link_section = ".data")]
 static mut BOOT_PT_L2: Aligned4K<[LA64PTE; 512]> = Aligned4K::new([LA64PTE::empty(); 512]);
 
+#[unsafe(link_section = ".data")]
+static mut BOOT_PT_HIGH_L2: Aligned4K<[LA64PTE; 512]> = Aligned4K::new([LA64PTE::empty(); 512]);
+
 unsafe fn init_boot_page_table() {
     unsafe {
         let l1_va = va!(&raw const BOOT_PT_L1 as usize);
@@ -36,12 +39,16 @@ unsafe fn init_boot_page_table() {
                 true,
             );
         }
-        // 0x8000_0000..0xc000_0000, VPWXGD, 1G block
-        BOOT_PT_L1[0x2] = LA64PTE::new_page(
-            pa!(0x8000_0000),
-            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE,
-            true,
-        );
+        let high_l2_va = va!(&raw const BOOT_PT_HIGH_L2 as usize);
+        // 0x8000_0000..0xc000_0000, 2M pages.
+        BOOT_PT_L1[0x2] = LA64PTE::new_table(axplat::mem::virt_to_phys(high_l2_va));
+        for i in 0..512 {
+            BOOT_PT_HIGH_L2[i] = LA64PTE::new_page(
+                pa!(0x8000_0000 + (i << 21)),
+                MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE,
+                true,
+            );
+        }
     }
 }
 

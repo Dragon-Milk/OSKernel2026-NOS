@@ -17,6 +17,7 @@
 # temp
 *.log
 .local-toolchains/
+logs/
 
 # workflow
 .codex/

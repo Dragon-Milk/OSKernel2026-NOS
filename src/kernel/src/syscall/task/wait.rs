@@ -8,6 +8,7 @@ use linux_raw_sys::general::{
     __WALL, __WCLONE, __WNOTHREAD, WCONTINUED, WEXITED, WNOHANG, WNOWAIT, WUNTRACED,
 };
 use starry_process::{Pid, Process};
+use starry_signal::Signo;
 use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::task::AsThread;
@@ -88,11 +89,12 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isiz
 
     let check_children = || {
         if let Some(child) = children.iter().find(|child| child.is_zombie()) {
+            let status = child.exit_code();
+            if let Some(exit_code) = exit_code.nullable() {
+                exit_code.vm_write(status)?;
+            }
             if !options.contains(WaitOptions::WNOWAIT) {
                 child.free();
-            }
-            if let Some(exit_code) = exit_code.nullable() {
-                exit_code.vm_write(child.exit_code())?;
             }
             Ok(Some(child.pid() as _))
         } else if options.contains(WaitOptions::WNOHANG) {
@@ -102,6 +104,13 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isiz
         }
     };
 
+    let wait_should_return_eintr = || {
+        let thread = curr.as_thread();
+        let mut pending = thread.signal.pending() & !thread.signal.blocked();
+        pending.remove(Signo::SIGCHLD);
+        !pending.is_empty()
+    };
+
     block_on(poll_fn(|cx| match check_children().transpose() {
         Some(res) => Poll::Ready(res),
         None => {
@@ -109,7 +118,8 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isiz
             if curr.poll_interrupt(cx).is_ready() {
                 match check_children().transpose() {
                     Some(res) => Poll::Ready(res),
-                    None => Poll::Ready(Err(AxError::Interrupted)),
+                    None if wait_should_return_eintr() => Poll::Ready(Err(AxError::Interrupted)),
+                    None => Poll::Pending,
                 }
             } else {
                 Poll::Pending

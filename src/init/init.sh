@@ -6,6 +6,7 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 
 # Set SKIP_LTP=0 to run the original ltp_testcode.sh scripts again.
 SKIP_LTP=${SKIP_LTP:-1}
+TEST_PROFILE=${TEST_PROFILE:-stable}
 
 run_with_shell() {
     script="$1"
@@ -21,6 +22,62 @@ run_with_shell() {
     else
         sh "$script"
     fi
+}
+
+busybox_cmd() {
+    if [ -x ./busybox ]; then
+        echo ./busybox
+    elif [ -x /busybox ]; then
+        echo /busybox
+    elif [ -x /musl/busybox ]; then
+        echo /musl/busybox
+    elif [ -x /glibc/busybox ]; then
+        echo /glibc/busybox
+    fi
+}
+
+is_leftover_command() {
+    case "$1" in
+        "./iperf3 -s"*|"iperf3 -s"*|"/glibc/iperf3 -s"*|"/musl/iperf3 -s"*| \
+        "./netserver"*|"netserver"*|"/glibc/netserver"*|"/musl/netserver"*| \
+        "./lmbench_all"*|"lmbench_all"*|"/glibc/lmbench_all"*|"/musl/lmbench_all"*| \
+        "./pipe 10"*|"pipe 10"*|"/glibc/pipe 10"*|"/musl/pipe 10"*| \
+        "./busybox sh ./lmbench_testcode.sh"*|"/glibc/busybox sh ./lmbench_testcode.sh"*|"/musl/busybox sh ./lmbench_testcode.sh"*| \
+        "./busybox sh ./unixbench_testcode.sh"*|"/glibc/busybox sh ./unixbench_testcode.sh"*|"/musl/busybox sh ./unixbench_testcode.sh"*)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+cleanup_leftovers_once() {
+    signal="$1"
+    bb="$2"
+
+    "$bb" ps | while read pid user time command; do
+        case "$pid" in
+            ''|PID) continue ;;
+        esac
+        [ "$pid" = "$$" ] && continue
+        case "$command" in
+            *"cleanup_leftovers_once"*) continue ;;
+        esac
+
+        if is_leftover_command "$command"; then
+            echo "cleanup leftover pid $pid: $command"
+            "$bb" kill "$signal" "$pid" >/dev/null 2>&1
+        fi
+    done
+}
+
+cleanup_leftovers() {
+    bb="$(busybox_cmd)"
+    [ -n "$bb" ] || return
+
+    cleanup_leftovers_once -TERM "$bb"
+    "$bb" sleep 1
+    cleanup_leftovers_once -KILL "$bb"
 }
 
 skip_ltp_testcase() {
@@ -61,6 +118,7 @@ run_test_dir() {
         found=1
         echo "run ${dir}/test_all.sh"
         run_with_shell ./test_all.sh
+        cleanup_leftovers
         cd /
         return
     fi
@@ -73,9 +131,65 @@ run_test_dir() {
             continue
         fi
         run_with_shell "$testcase"
+        cleanup_leftovers
     done
 
     cd /
+}
+
+run_test_path() {
+    script="$1"
+
+    [ -f "$script" ] || return
+
+    found=1
+    dir="${script%/*}"
+    name="${script##*/}"
+
+    cd "$dir" || return
+    set_library_path "$dir"
+    echo "run ${dir}/${name}"
+    if skip_ltp_testcase "$name" "$dir"; then
+        cd /
+        return
+    fi
+    run_with_shell "./$name"
+    cleanup_leftovers
+    cd /
+}
+
+run_stable_tests() {
+    for testcase in \
+        /glibc/basic_testcode.sh \
+        /glibc/busybox_testcode.sh \
+        /glibc/cyclictest_testcode.sh \
+        /glibc/iozone_testcode.sh \
+        /glibc/iperf_testcode.sh \
+        /glibc/libcbench_testcode.sh \
+        /glibc/lua_testcode.sh \
+        /glibc/netperf_testcode.sh \
+        /musl/basic_testcode.sh \
+        /musl/busybox_testcode.sh \
+        /musl/lua_testcode.sh \
+        /musl/iozone_testcode.sh \
+        /musl/iperf_testcode.sh \
+        /musl/netperf_testcode.sh \
+        /musl/libcbench_testcode.sh \
+        /glibc/lmbench_testcode.sh
+    do
+        run_test_path "$testcase"
+    done
+}
+
+run_wait_repro_tests() {
+    for testcase in \
+        /glibc/libctest_testcode.sh \
+        /glibc/lmbench_testcode.sh \
+        /glibc/unixbench_testcode.sh \
+        /musl/basic_testcode.sh
+    do
+        run_test_path "$testcase"
+    done
 }
 
 cd /
@@ -96,9 +210,23 @@ cd /
 
 # --- full test suite (comment out the single test above) ---
 found=0
-for dir in / /glibc /musl; do
-    run_test_dir "$dir"
-done
+case "$TEST_PROFILE" in
+    stable)
+        run_stable_tests
+        ;;
+    wait-repro)
+        run_wait_repro_tests
+        ;;
+    full)
+        for dir in / /glibc /musl; do
+            run_test_dir "$dir"
+        done
+        ;;
+    *)
+        echo "Unknown TEST_PROFILE=$TEST_PROFILE; using stable profile."
+        run_stable_tests
+        ;;
+esac
 if [ "$found" -eq 0 ]; then
     for testcase in /*_testcode.sh /scripts/*/*_testcode.sh; do
         [ -f "$testcase" ] || continue
@@ -113,6 +241,7 @@ if [ "$found" -eq 0 ]; then
             continue
         fi
         run_with_shell "./$name"
+        cleanup_leftovers
         cd /
     done
 fi
