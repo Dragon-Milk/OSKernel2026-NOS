@@ -20,7 +20,12 @@ pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> AxR
             monotonic_time()
         }
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
-            let (utime, stime) = current().as_thread().time.borrow().output();
+            let (utime, stime) = current()
+                .as_thread()
+                .time
+                .try_borrow()
+                .map_err(|_| AxError::WouldBlock)?
+                .output();
             utime + stime
         }
         _ => {
@@ -61,7 +66,12 @@ pub struct Tms {
 }
 
 pub fn sys_times(tms: *mut Tms) -> AxResult<isize> {
-    let (utime, stime) = current().as_thread().time.borrow().output();
+    let (utime, stime) = current()
+        .as_thread()
+        .time
+        .try_borrow()
+        .map_err(|_| AxError::WouldBlock)?
+        .output();
     let utime = utime.as_micros() as usize;
     let stime = stime.as_micros() as usize;
     tms.vm_write(Tms {
@@ -75,7 +85,12 @@ pub fn sys_times(tms: *mut Tms) -> AxResult<isize> {
 
 pub fn sys_getitimer(which: i32, value: *mut itimerval) -> AxResult<isize> {
     let ty = ITimerType::from_repr(which).ok_or(AxError::InvalidInput)?;
-    let (it_interval, it_value) = current().as_thread().time.borrow().get_itimer(ty);
+    let (it_interval, it_value) = current()
+        .as_thread()
+        .time
+        .try_borrow()
+        .map_err(|_| AxError::WouldBlock)?
+        .get_itimer(ty);
 
     value.vm_write(itimerval {
         it_interval: timeval::from_time_value(it_interval),

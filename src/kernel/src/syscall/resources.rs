@@ -59,7 +59,13 @@ struct Rusage {
 
 impl Rusage {
     fn from_thread(thread: &Thread) -> Self {
-        let (utime, stime) = thread.time.borrow().output();
+        // try_borrow: avoid panic when a mutable borrow is already held
+        // (e.g. during timer interrupt / poll_timer).
+        let (utime, stime) = thread
+            .time
+            .try_borrow()
+            .map(|t| t.output())
+            .unwrap_or_default();
         Self { utime, stime }
     }
 

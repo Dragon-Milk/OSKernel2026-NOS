@@ -86,7 +86,13 @@ impl TaskStat {
         let ppid = proc.parent().map_or(0, |p| p.pid());
         let pgrp = proc.group().pgid();
         let session = proc.group().session().sid();
-        let (utime, stime) = thread.time.borrow().output();
+        // Use try_borrow to avoid panicking when a mutable borrow is already
+        // held (e.g. during timer interrupt / poll_timer).
+        let (utime, stime) = thread
+            .time
+            .try_borrow()
+            .map(|t| t.output())
+            .unwrap_or_default();
         let utime = nanos_to_ticks(utime.as_nanos() as u64);
         let stime = nanos_to_ticks(stime.as_nanos() as u64);
         Ok(Self {
