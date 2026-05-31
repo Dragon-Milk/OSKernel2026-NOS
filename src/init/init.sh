@@ -51,6 +51,15 @@ is_leftover_command() {
     return 1
 }
 
+needs_cleanup() {
+    case "$1" in
+        *iperf*|*netperf*|*lmbench*|*unixbench*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 cleanup_leftovers_once() {
     signal="$1"
     bb="$2"
@@ -118,7 +127,7 @@ run_test_dir() {
         found=1
         echo "run ${dir}/test_all.sh"
         run_with_shell ./test_all.sh
-        cleanup_leftovers
+        needs_cleanup "$dir" && cleanup_leftovers
         cd /
         return
     fi
@@ -131,7 +140,7 @@ run_test_dir() {
             continue
         fi
         run_with_shell "$testcase"
-        cleanup_leftovers
+        needs_cleanup "$testcase" && cleanup_leftovers
     done
 
     cd /
@@ -154,7 +163,7 @@ run_test_path() {
         return
     fi
     run_with_shell "./$name"
-    cleanup_leftovers
+    needs_cleanup "$script" && cleanup_leftovers
     cd /
 }
 
@@ -174,11 +183,14 @@ run_stable_tests() {
         /musl/iozone_testcode.sh \
         /musl/iperf_testcode.sh \
         /musl/netperf_testcode.sh \
-        /musl/libcbench_testcode.sh \
-        /glibc/lmbench_testcode.sh
+        /musl/libcbench_testcode.sh
     do
         run_test_path "$testcase"
     done
+}
+
+run_lmbench_only_tests() {
+    run_test_path /glibc/lmbench_testcode.sh
 }
 
 run_wait_repro_tests() {
@@ -214,6 +226,13 @@ case "$TEST_PROFILE" in
     stable)
         run_stable_tests
         ;;
+    stable-lmbench)
+        run_stable_tests
+        run_lmbench_only_tests
+        ;;
+    lmbench-only)
+        run_lmbench_only_tests
+        ;;
     wait-repro)
         run_wait_repro_tests
         ;;
@@ -241,7 +260,7 @@ if [ "$found" -eq 0 ]; then
             continue
         fi
         run_with_shell "./$name"
-        cleanup_leftovers
+        needs_cleanup "$testcase" && cleanup_leftovers
         cd /
     done
 fi
