@@ -33,3 +33,7 @@ kernel-la
 src/make/sdcard-la.img:Zone.Identifier
 src/make/sdcard-rv.img:Zone.Identifier
 testsuits-for-oskernel/
+
+# understand-anything
+.understand-anything_en/
+.understand-anything/
