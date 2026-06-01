@@ -193,6 +193,60 @@ run_lmbench_only_tests() {
     run_test_path /glibc/lmbench_testcode.sh
 }
 
+run_lmbench_fast_tests() {
+    found=1
+    cd /glibc || return
+    set_library_path /glibc
+    echo "run /glibc/lmbench-fast"
+    echo "#### OS COMP TEST GROUP START lmbench-glibc ####"
+
+    echo latency measurements
+    ./lmbench_all lat_syscall -P 1 null
+    ./lmbench_all lat_syscall -P 1 read
+    ./lmbench_all lat_syscall -P 1 write
+    ./busybox mkdir -p /var/tmp
+    ./busybox touch /var/tmp/lmbench
+    ./lmbench_all lat_syscall -P 1 stat /var/tmp/lmbench
+    ./lmbench_all lat_syscall -P 1 fstat /var/tmp/lmbench
+    ./lmbench_all lat_syscall -P 1 open /var/tmp/lmbench
+    ./lmbench_all lat_select -n 100 -P 1 file
+    ./lmbench_all lat_sig -P 1 install
+    ./lmbench_all lat_sig -P 1 catch
+    ./lmbench_all lat_pipe -P 1
+    ./lmbench_all lat_proc -P 1 fork
+    ./lmbench_all lat_proc -P 1 exec
+    ./lmbench_all lat_proc -P 1 shell
+    ./lmbench_all lmdd label="File /var/tmp/XXX write bandwidth:" of=/var/tmp/XXX move=1m fsync=1 print=3
+    ./lmbench_all lat_pagefault -P 1 /var/tmp/XXX
+    ./lmbench_all lat_mmap -P 1 512k /var/tmp/XXX
+
+    echo Bandwidth measurements
+    ./lmbench_all bw_pipe -P 1
+
+    echo "#### OS COMP TEST GROUP END lmbench-glibc ####"
+    cd /
+}
+
+run_lmbench_write_tests() {
+    found=1
+    cd /glibc || return
+    set_library_path /glibc
+    echo "run /glibc/lmbench_all lat_syscall -P 1 write"
+    ./lmbench_all lat_syscall -P 1 write
+    echo "lmbench-write-debug before mkdir"
+    ./busybox mkdir -p /var/tmp
+    echo "lmbench-write-debug after mkdir"
+    ./busybox touch /var/tmp/lmbench
+    echo "lmbench-write-debug after touch"
+    ./lmbench_all lat_syscall -P 1 stat /var/tmp/lmbench
+    echo "lmbench-write-debug after stat"
+    ./lmbench_all lat_syscall -P 1 fstat /var/tmp/lmbench
+    echo "lmbench-write-debug after fstat"
+    ./lmbench_all lat_syscall -P 1 open /var/tmp/lmbench
+    echo "lmbench-write-debug after open"
+    cd /
+}
+
 run_wait_repro_tests() {
     for testcase in \
         /glibc/libctest_testcode.sh \
@@ -232,6 +286,12 @@ case "$TEST_PROFILE" in
         ;;
     lmbench-only)
         run_lmbench_only_tests
+        ;;
+    lmbench-fast)
+        run_lmbench_fast_tests
+        ;;
+    lmbench-write)
+        run_lmbench_write_tests
         ;;
     wait-repro)
         run_wait_repro_tests
