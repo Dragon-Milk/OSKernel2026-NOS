@@ -17,7 +17,7 @@ extern crate axruntime;
 #[macro_use]
 extern crate axlog;
 
-//! 内核入口
+// 内核入口
 pub mod entry;
 
 mod config;

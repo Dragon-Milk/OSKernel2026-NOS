@@ -1,4 +1,17 @@
 //! User task management.
+//!
+//! 本模块负责：
+//! - 管理用户态进程和线程的生命周期
+//! - 维护进程共享数据（`ProcessData`）和线程私有数据（`Thread`）
+//! - 处理信号、futex、资源限制、时间管理等
+//!
+//! 核心不变量：
+//! - `Thread` 通过 `AssumeSync` 包装 `RefCell<TimeManager>`，因为仅在上下文切换时独占访问
+//! - `ProcessData` 由同一进程的所有线程共享
+//!
+//! 修改注意：
+//! - 新增线程字段时需考虑并发安全性
+//! - 进程退出事件通过 `PollSet` 通知等待的父进程
 
 mod futex;
 mod ops;
@@ -31,6 +44,10 @@ pub use self::{futex::*, ops::*, resources::*, signal::*, stat::*, timer::*, use
 use crate::mm::AddrSpace;
 
 ///  A wrapper type that assumes the inner type is `Sync`.
+/// 假设内部类型是 `Sync` 的包装类型。
+///
+/// 用于包装实际仅在独占访问时才会被可变借用的类型（如 `RefCell`），
+/// 使其可以安全地存储在需要 `Sync` 的结构体中。
 #[repr(transparent)]
 pub struct AssumeSync<T>(pub T);
 
@@ -45,8 +62,13 @@ impl<T> Deref for AssumeSync<T> {
 }
 
 /// The inner data of a thread.
+/// 线程的内部数据。
+///
+/// 表示一个用户态线程的所有私有状态，包括信号处理、时间管理、退出标志等。
+/// 线程通过 `Arc<ProcessData>` 共享进程级别的资源。
 pub struct Thread {
     /// The process data shared by all threads in the process.
+    /// 进程内所有线程共享的数据。
     pub proc_data: Arc<ProcessData>,
 
     /// The clear thread tid field
@@ -55,30 +77,38 @@ pub struct Thread {
     ///
     /// When the thread exits, the kernel clears the word at this address if it
     /// is not NULL.
+    /// 线程退出时内核会自动清零的地址字段，用于 glibc 线程清理。
     clear_child_tid: AtomicUsize,
 
     /// The head of the robust list
+    /// robust 互斥锁链表头，用于进程崩溃时恢复互斥锁状态。
     robust_list_head: AtomicUsize,
 
     /// The thread-level signal manager
+    /// 线程级信号管理器。
     pub signal: Arc<ThreadSignalManager>,
 
     /// Time manager
     ///
     /// This is assumed to be `Sync` because it's only borrowed mutably during
     /// context switches, which is exclusive to the current thread.
+    /// 时间管理器，通过 `AssumeSync` 包装，仅在上下文切换时独占访问。
     pub time: AssumeSync<RefCell<TimeManager>>,
 
     /// The OOM score adjustment value.
+    /// OOM 评分调整值。
     oom_score_adj: AtomicI32,
 
     /// Ready to exit
+    /// 准备退出标志。
     pub exit: Arc<AtomicBool>,
 
     /// Indicates whether the thread is currently accessing user memory.
+    /// 标记线程是否正在访问用户态内存。
     accessing_user_memory: AtomicBool,
 
     /// Self exit event
+    /// 自身退出事件通知。
     pub exit_event: Arc<PollSet>,
 }
 
@@ -167,11 +197,14 @@ impl TaskExt for Box<Thread> {
 }
 
 /// Helper trait to access the thread from a task.
+/// 从 task 获取 thread 的辅助 trait。
 pub trait AsThread {
     /// Try to get the thread from the task.
+    /// 尝试从 task 获取 thread，内核 task 返回 None。
     fn try_as_thread(&self) -> Option<&Thread>;
 
     /// Get the thread from the task, panicking if it is a kernel task.
+    /// 获取 thread，如果是内核 task 则 panic。
     fn as_thread(&self) -> &Thread {
         self.try_as_thread().expect("kernel task")
     }
@@ -185,38 +218,54 @@ impl AsThread for TaskInner {
 }
 
 /// [`Process`]-shared data.
+/// 进程级共享数据。
+///
+/// 包含同一进程内所有线程共享的状态，如地址空间、信号管理器、资源限制等。
 pub struct ProcessData {
     /// The process.
+    /// 进程对象。
     pub proc: Arc<Process>,
     /// The executable path
+    /// 可执行文件路径。
     pub exe_path: RwLock<String>,
     /// The command line arguments
+    /// 命令行参数。
     pub cmdline: RwLock<Arc<Vec<String>>>,
     /// The virtual memory address space.
+    /// 虚拟内存地址空间。
     // TODO: scopify
     pub aspace: Arc<Mutex<AddrSpace>>,
     /// The resource scope
+    /// 资源作用域。
     pub scope: RwLock<Scope>,
     /// The user heap top
+    /// 用户堆内存顶端地址。
     heap_top: AtomicUsize,
 
     /// The resource limits
+    /// 资源限制。
     pub rlim: RwLock<Rlimits>,
 
     /// The child exit wait event
+    /// 子进程退出等待事件。
     pub child_exit_event: Arc<PollSet>,
     /// Self exit event
+    /// 自身退出事件。
     pub exit_event: Arc<PollSet>,
     /// The exit signal of the thread
+    /// 线程退出时发送给父进程的信号。
     pub exit_signal: Option<Signo>,
 
     /// The process signal manager
+    /// 进程级信号管理器。
     pub signal: Arc<ProcessSignalManager>,
 
     /// The futex table.
+    /// futex 表，用于管理线程间的快速同步。
     futex_table: Arc<FutexTable>,
 
     /// The default mask for file permissions.
+    /// 文件权限默认掩码。
     umask: AtomicU32,
 }
 
