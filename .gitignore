@@ -23,6 +23,7 @@ logs/
 .codex/
 .agents/
 .claude/
+**/.claude/
 workflow/
 
 # target
