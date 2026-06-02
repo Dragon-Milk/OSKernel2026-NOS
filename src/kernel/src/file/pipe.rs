@@ -120,7 +120,7 @@ impl FileLike for Pipe {
             return Ok(0);
         }
 
-        block_on(poll_io(self, IoEvents::IN, self.nonblocking(), || {
+        let mut try_read = || {
             let read = {
                 let cons = self.shared.buffer.lock();
                 let (left, right) = cons.as_slices();
@@ -139,7 +139,15 @@ impl FileLike for Pipe {
             } else {
                 Err(AxError::WouldBlock)
             }
-        }))
+        };
+
+        match try_read() {
+            Ok(read) => Ok(read),
+            Err(AxError::WouldBlock) => {
+                block_on(poll_io(self, IoEvents::IN, self.nonblocking(), try_read))
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn write(&self, src: &mut IoSrc) -> AxResult<usize> {
@@ -153,7 +161,7 @@ impl FileLike for Pipe {
 
         let mut total_written = 0;
 
-        block_on(poll_io(self, IoEvents::OUT, self.nonblocking(), || {
+        let mut try_write = || {
             if self.closed() {
                 raise_pipe();
                 return Err(AxError::BrokenPipe);
@@ -177,7 +185,15 @@ impl FileLike for Pipe {
                 }
             }
             Err(AxError::WouldBlock)
-        }))
+        };
+
+        match try_write() {
+            Ok(written) => Ok(written),
+            Err(AxError::WouldBlock) => {
+                block_on(poll_io(self, IoEvents::OUT, self.nonblocking(), try_write))
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn stat(&self) -> AxResult<Kstat> {

@@ -156,19 +156,23 @@ pub fn sys_mmap(
         dst_addr
     } else {
         let align = page_size as usize;
+        let limit = VirtAddrRange::new(aspace.base(), aspace.end());
+        // If the hint is below the address space base, skip the first search
+        let hint = if start < aspace.base().as_usize() {
+            aspace.base()
+        } else {
+            VirtAddr::from(start)
+        };
         aspace
-            .find_free_area(
-                VirtAddr::from(start),
-                length,
-                VirtAddrRange::new(aspace.base(), aspace.end()),
-                align,
-            )
-            .or(aspace.find_free_area(
-                aspace.base(),
-                length,
-                VirtAddrRange::new(aspace.base(), aspace.end()),
-                align,
-            ))
+            .find_free_area(hint, length, limit, align)
+            .or_else(|| {
+                // Only retry from base if we started above base
+                if hint != aspace.base() {
+                    aspace.find_free_area(aspace.base(), length, limit, align)
+                } else {
+                    None
+                }
+            })
             .ok_or(AxError::NoMemory)?
     };
 

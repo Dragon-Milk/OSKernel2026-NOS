@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::{fmt, time::Duration};
 
 use axerrno::{AxError, AxResult};
@@ -13,7 +13,7 @@ use starry_signal::SignalSet;
 
 use super::FdPollSet;
 use crate::{
-    file::FD_TABLE,
+    file::{FD_TABLE, FileLike},
     mm::{UserConstPtr, UserPtr, nullable},
     syscall::signal::check_sigset_size,
     task::with_blocked_signals,
@@ -40,6 +40,66 @@ impl fmt::Debug for FdSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(&self.0).finish()
     }
+}
+
+/// Poll all fds without allocation. Returns ready count and fills fd_sets.
+fn poll_fds_direct(
+    fd_bitmap: &Bitmap<{ __FD_SETSIZE as usize }>,
+    read_set: &FdSet,
+    write_set: &FdSet,
+    except_set: &FdSet,
+    readfds: &mut Option<&mut __kernel_fd_set>,
+    writefds: &mut Option<&mut __kernel_fd_set>,
+    exceptfds: &mut Option<&mut __kernel_fd_set>,
+) -> AxResult<(usize, Vec<(Arc<dyn FileLike>, IoEvents, usize)>)> {
+    let mut res = 0usize;
+    let fd_table = FD_TABLE.read();
+    let fd_count = fd_bitmap.len();
+    let mut ready_fds = Vec::with_capacity(fd_count);
+
+    for fd in fd_bitmap.into_iter() {
+        let f = fd_table
+            .get(fd)
+            .ok_or(AxError::BadFileDescriptor)?
+            .inner
+            .clone();
+        let mut interested = IoEvents::empty();
+        interested.set(IoEvents::IN, read_set.0.get(fd));
+        interested.set(IoEvents::OUT, write_set.0.get(fd));
+        interested.set(IoEvents::ERR, except_set.0.get(fd));
+
+        if interested.is_empty() {
+            continue;
+        }
+
+        let events = f.poll() & interested;
+        let mut fd_ready = false;
+        if events.contains(IoEvents::IN)
+            && let Some(set) = readfds.as_deref_mut()
+        {
+            fd_ready = true;
+            unsafe { FD_SET(fd as _, set) };
+        }
+        if events.contains(IoEvents::OUT)
+            && let Some(set) = writefds.as_deref_mut()
+        {
+            fd_ready = true;
+            unsafe { FD_SET(fd as _, set) };
+        }
+        if events.contains(IoEvents::ERR)
+            && let Some(set) = exceptfds.as_deref_mut()
+        {
+            fd_ready = true;
+            unsafe { FD_SET(fd as _, set) };
+        }
+        if fd_ready {
+            res += 1;
+        }
+        ready_fds.push((f, interested, fd));
+    }
+
+    drop(fd_table);
+    Ok((res, ready_fds))
 }
 
 fn do_select(
@@ -74,43 +134,54 @@ fn do_select(
          {except_set:?}] timeout: {timeout:?}"
     );
 
-    let fd_table = FD_TABLE.read();
     let fd_bitmap = read_set.0 | write_set.0 | except_set.0;
-    let fd_count = fd_bitmap.len();
-    let mut fds = Vec::with_capacity(fd_count);
-    let mut fd_indices = Vec::with_capacity(fd_count);
-    for fd in fd_bitmap.into_iter() {
-        let f = fd_table
-            .get(fd)
-            .ok_or(AxError::BadFileDescriptor)?
-            .inner
-            .clone();
-        let mut events = IoEvents::empty();
-        events.set(IoEvents::IN, read_set.0.get(fd));
-        events.set(IoEvents::OUT, write_set.0.get(fd));
-        events.set(IoEvents::ERR, except_set.0.get(fd));
-        if !events.is_empty() {
-            fds.push((f, events));
-            fd_indices.push(fd);
+    if fd_bitmap.is_empty() {
+        return Ok(0);
+    }
+
+    // Clear all sets before filling
+    let clear_sets = |readfds: &mut Option<&mut __kernel_fd_set>,
+                      writefds: &mut Option<&mut __kernel_fd_set>,
+                      exceptfds: &mut Option<&mut __kernel_fd_set>| {
+        if let Some(readfds) = readfds.as_deref_mut() {
+            unsafe { FD_ZERO(readfds) };
         }
+        if let Some(writefds) = writefds.as_deref_mut() {
+            unsafe { FD_ZERO(writefds) };
+        }
+        if let Some(exceptfds) = exceptfds.as_deref_mut() {
+            unsafe { FD_ZERO(exceptfds) };
+        }
+    };
+
+    clear_sets(&mut readfds, &mut writefds, &mut exceptfds);
+
+    // First pass: poll all fds directly
+    let (ready, all_fds) = poll_fds_direct(
+        &fd_bitmap,
+        &read_set,
+        &write_set,
+        &except_set,
+        &mut readfds,
+        &mut writefds,
+        &mut exceptfds,
+    )?;
+
+    if ready > 0 || timeout == Some(Duration::ZERO) {
+        return Ok(ready as _);
     }
 
-    drop(fd_table);
-    let fds = FdPollSet(fds);
+    // Nothing ready yet, need to wait. Build FdPollSet from all_fds.
+    let fd_indices: Vec<usize> = all_fds.iter().map(|(_, _, idx)| *idx).collect();
+    let poll_fds: Vec<(Arc<dyn FileLike>, IoEvents)> =
+        all_fds.into_iter().map(|(f, e, _)| (f, e)).collect();
+    let fds = FdPollSet(poll_fds);
 
-    if let Some(readfds) = readfds.as_deref_mut() {
-        unsafe { FD_ZERO(readfds) };
-    }
-    if let Some(writefds) = writefds.as_deref_mut() {
-        unsafe { FD_ZERO(writefds) };
-    }
-    if let Some(exceptfds) = exceptfds.as_deref_mut() {
-        unsafe { FD_ZERO(exceptfds) };
-    }
     with_blocked_signals(sigmask.copied(), || {
         match block_on(future::timeout(
             timeout,
             poll_io(&fds, IoEvents::empty(), false, || {
+                clear_sets(&mut readfds, &mut writefds, &mut exceptfds);
                 let mut res = 0usize;
                 for ((fd, interested), index) in fds.0.iter().zip(fd_indices.iter().copied()) {
                     let events = fd.poll() & *interested;
@@ -134,10 +205,10 @@ fn do_select(
                     }
                 }
                 if res > 0 {
-                    return Ok(res as _);
+                    Ok(res as _)
+                } else {
+                    Err(AxError::WouldBlock)
                 }
-
-                Err(AxError::WouldBlock)
             }),
         )) {
             Ok(r) => r,

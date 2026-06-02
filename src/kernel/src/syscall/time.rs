@@ -1,5 +1,8 @@
 use axerrno::{AxError, AxResult};
-use axhal::time::{TimeValue, monotonic_time, monotonic_time_nanos, nanos_to_ticks, wall_time};
+use axhal::time::{
+    NANOS_PER_MICROS, NANOS_PER_SEC, TimeValue, monotonic_time_nanos, nanos_to_ticks,
+    wall_time_nanos,
+};
 use axtask::current;
 use linux_raw_sys::general::{
     __kernel_clockid_t, CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_MONOTONIC_COARSE,
@@ -14,10 +17,10 @@ use crate::{
 };
 
 pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> AxResult<isize> {
-    let now = match clock_id as u32 {
-        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => wall_time(),
+    let nanos = match clock_id as u32 {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => wall_time_nanos(),
         CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
-            monotonic_time()
+            monotonic_time_nanos()
         }
         CLOCK_PROCESS_CPUTIME_ID | CLOCK_THREAD_CPUTIME_ID => {
             let (utime, stime) = current()
@@ -26,20 +29,28 @@ pub fn sys_clock_gettime(clock_id: __kernel_clockid_t, ts: *mut timespec) -> AxR
                 .try_borrow()
                 .map_err(|_| AxError::WouldBlock)?
                 .output();
-            utime + stime
+            (utime + stime).as_nanos() as u64
         }
         _ => {
             warn!("Called sys_clock_gettime for unsupported clock {clock_id}");
-            wall_time()
-            // return Err(AxError::EINVAL);
+            wall_time_nanos()
         }
     };
-    ts.vm_write(timespec::from_time_value(now))?;
+    // Compute timespec directly from nanos to avoid intermediate Duration allocation
+    ts.vm_write(timespec {
+        tv_sec: (nanos / NANOS_PER_SEC) as _,
+        tv_nsec: (nanos % NANOS_PER_SEC) as _,
+    })?;
     Ok(0)
 }
 
 pub fn sys_gettimeofday(ts: *mut timeval) -> AxResult<isize> {
-    ts.vm_write(timeval::from_time_value(wall_time()))?;
+    let nanos = wall_time_nanos();
+    // Compute timeval directly from nanos to avoid intermediate Duration allocation
+    ts.vm_write(timeval {
+        tv_sec: (nanos / NANOS_PER_SEC) as _,
+        tv_usec: ((nanos % NANOS_PER_SEC) / NANOS_PER_MICROS) as _,
+    })?;
     Ok(0)
 }
 
