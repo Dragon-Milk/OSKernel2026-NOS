@@ -5,6 +5,18 @@ export USER=root
 export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 
 # Set SKIP_LTP=0 to run the original ltp_testcode.sh scripts again.
+# ============================================================
+# Select test profile here.
+# stable        : current safe 910-score profile
+# cyc-musl      : run musl cyclictest only
+# cyc-all       : run glibc and musl cyclictest only
+# libctest      : run glibc and musl libctest only
+# lmbench       : run glibc and musl lmbench only
+# lmbench-only  : run original glibc lmbench script
+# lmbench-fast  : run trimmed glibc lmbench
+# wait-repro    : run wait/libctest/lmbench/unixbench repro
+# full          : scan and run all testcode scripts
+# ============================================================
 SKIP_LTP=${SKIP_LTP:-1}
 TEST_PROFILE=${TEST_PROFILE:-stable}
 
@@ -189,6 +201,29 @@ run_stable_tests() {
     done
 }
 
+run_cyclictest_musl_tests() {
+    found=1
+    run_test_path /musl/cyclictest_testcode.sh
+}
+
+run_cyclictest_tests() {
+    found=1
+    run_test_path /glibc/cyclictest_testcode.sh
+    run_test_path /musl/cyclictest_testcode.sh
+}
+
+run_libctest_tests() {
+    found=1
+    run_test_path /glibc/libctest_testcode.sh
+    run_test_path /musl/libctest_testcode.sh
+}
+
+run_lmbench_tests() {
+    found=1
+    run_test_path /glibc/lmbench_testcode.sh
+    run_test_path /musl/lmbench_testcode.sh
+}
+
 run_lmbench_only_tests() {
     run_test_path /glibc/lmbench_testcode.sh
 }
@@ -283,6 +318,18 @@ case "$TEST_PROFILE" in
     stable-lmbench)
         run_stable_tests
         run_lmbench_only_tests
+        ;;
+    cyc-musl)
+        run_cyclictest_musl_tests
+        ;;
+    cyc-all)
+        run_cyclictest_tests
+        ;;
+    libctest)
+        run_libctest_tests
+        ;;
+    lmbench)
+        run_lmbench_tests
         ;;
     lmbench-only)
         run_lmbench_only_tests
