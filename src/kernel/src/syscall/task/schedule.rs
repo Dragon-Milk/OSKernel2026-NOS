@@ -1,3 +1,5 @@
+use core::mem::size_of;
+
 use axerrno::{AxError, AxResult};
 use axhal::time::TimeValue;
 use axtask::{
@@ -6,7 +8,7 @@ use axtask::{
 };
 use linux_raw_sys::general::{
     __kernel_clockid_t, CLOCK_MONOTONIC, CLOCK_REALTIME, PRIO_PGRP, PRIO_PROCESS, PRIO_USER,
-    SCHED_RR, TIMER_ABSTIME, timespec,
+    SCHED_FIFO, SCHED_NORMAL, SCHED_RR, TIMER_ABSTIME, timespec,
 };
 use starry_vm::{VmMutPtr, VmPtr, vm_load, vm_write_slice};
 
@@ -128,14 +130,105 @@ pub fn sys_sched_setaffinity(
 }
 
 pub fn sys_sched_getscheduler(_pid: i32) -> AxResult<isize> {
-    Ok(SCHED_RR as _)
+    Ok(SCHED_NORMAL as _)
 }
 
-pub fn sys_sched_setscheduler(_pid: i32, _policy: i32, _param: *const ()) -> AxResult<isize> {
+fn read_sched_priority(param: *const ()) -> AxResult<i32> {
+    if let Some(param) = param.nullable() {
+        Ok((param as *const i32).vm_read()?)
+    } else {
+        Err(AxError::InvalidInput)
+    }
+}
+
+pub fn sys_sched_setparam(_pid: i32, param: *const ()) -> AxResult<isize> {
+    let _priority = read_sched_priority(param)?;
     Ok(0)
 }
 
-pub fn sys_sched_getparam(_pid: i32, _param: *mut ()) -> AxResult<isize> {
+pub fn sys_sched_setscheduler(_pid: i32, policy: i32, param: *const ()) -> AxResult<isize> {
+    let priority = read_sched_priority(param)?;
+    match policy as u32 {
+        SCHED_FIFO | SCHED_RR if priority >= 1 && priority <= 99 => Ok(0),
+        SCHED_NORMAL if priority == 0 => Ok(0),
+        _ => Err(AxError::InvalidInput),
+    }
+}
+
+#[repr(C)]
+pub struct SchedParam {
+    pub sched_priority: i32,
+}
+
+pub fn sys_sched_getparam(_pid: i32, param: *mut ()) -> AxResult<isize> {
+    (param as *mut SchedParam).vm_write(SchedParam { sched_priority: 0 })?;
+    Ok(0)
+}
+
+pub fn sys_sched_get_priority_max(policy: i32) -> AxResult<isize> {
+    match policy as u32 {
+        SCHED_FIFO | SCHED_RR => Ok(99),
+        SCHED_NORMAL => Ok(0),
+        _ => Err(AxError::InvalidInput),
+    }
+}
+
+pub fn sys_sched_get_priority_min(policy: i32) -> AxResult<isize> {
+    match policy as u32 {
+        SCHED_FIFO | SCHED_RR => Ok(1),
+        SCHED_NORMAL => Ok(0),
+        _ => Err(AxError::InvalidInput),
+    }
+}
+
+pub fn sys_sched_rr_get_interval(_pid: i32, tp: *mut timespec) -> AxResult<isize> {
+    let ts = timespec {
+        tv_sec: 0,
+        tv_nsec: 100_000_000,
+    };
+    tp.vm_write(ts)?;
+    Ok(0)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SchedAttr {
+    pub size: u32,
+    pub sched_policy: u32,
+    pub sched_flags: u64,
+    pub sched_nice: i32,
+    pub sched_priority: u32,
+    pub sched_runtime: u64,
+    pub sched_deadline: u64,
+    pub sched_period: u64,
+}
+
+impl SchedAttr {
+    fn default_for(policy: u32, priority: u32) -> Self {
+        Self {
+            size: size_of::<Self>() as u32,
+            sched_policy: policy,
+            sched_flags: 0,
+            sched_nice: 0,
+            sched_priority: priority,
+            sched_runtime: 0,
+            sched_deadline: 0,
+            sched_period: 0,
+        }
+    }
+}
+
+pub fn sys_sched_setattr(_pid: i32, attr: *const u8, _flags: u32) -> AxResult<isize> {
+    let _size: u32 = unsafe { (attr as *const u32).vm_read_uninit()?.assume_init() };
+    Ok(0)
+}
+
+pub fn sys_sched_getattr(_pid: i32, attr: *mut u8, size: u32, _flags: u32) -> AxResult<isize> {
+    if size < size_of::<SchedAttr>() as u32 {
+        return Err(AxError::InvalidInput);
+    }
+    let sched_attr = SchedAttr::default_for(SCHED_NORMAL, 0);
+    (attr as *mut SchedAttr).vm_write(sched_attr)?;
     Ok(0)
 }
 
