@@ -12,14 +12,40 @@ mod time;
 
 use axerrno::{AxError, LinuxError};
 use axhal::uspace::UserContext;
+use axtask::current;
 use syscalls::Sysno;
 
 pub use self::{
     fs::*, io_mpx::*, ipc::*, mm::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*,
     time::*,
 };
+use crate::task::{AsThread, RestartSyscall, ltp_trace_current_enabled};
+
+#[cfg(target_arch = "x86_64")]
+const SYSCALL_INSN_LEN: usize = 2;
+#[cfg(not(target_arch = "x86_64"))]
+const SYSCALL_INSN_LEN: usize = 4;
+
+fn restartable_syscall(sysno: Sysno) -> bool {
+    matches!(sysno, Sysno::wait4)
+}
+
+fn restart_syscall_context(uctx: &UserContext, sysno: usize) -> RestartSyscall {
+    let mut pre_syscall_context = *uctx;
+    let syscall_ip = pre_syscall_context.ip() - SYSCALL_INSN_LEN;
+    pre_syscall_context.set_ip(syscall_ip);
+    RestartSyscall {
+        pre_syscall_context,
+        sysno,
+    }
+}
 
 pub fn handle_syscall(uctx: &mut UserContext) {
+    let curr = current();
+    if let Some(thr) = curr.try_as_thread() {
+        thr.clear_restart_syscall();
+    }
+
     let Some(sysno) = Sysno::new(uctx.sysno()) else {
         warn!("Invalid syscall number: {}", uctx.sysno());
         uctx.set_retval(-LinuxError::ENOSYS.code() as _);
@@ -27,6 +53,8 @@ pub fn handle_syscall(uctx: &mut UserContext) {
     };
 
     trace!("Syscall {sysno:?}");
+    let restart_syscall =
+        restartable_syscall(sysno).then(|| restart_syscall_context(uctx, uctx.sysno()));
 
     let result = match sysno {
         // fs ctl
@@ -652,6 +680,21 @@ pub fn handle_syscall(uctx: &mut UserContext) {
         }
     };
     debug!("Syscall {sysno} return {result:?}");
+    if matches!(result.as_ref(), Err(err) if matches!(*err, AxError::Interrupted))
+        && let Some(restart) = restart_syscall
+        && let Some(thr) = curr.try_as_thread()
+    {
+        thr.set_restart_syscall(restart);
+        if ltp_trace_current_enabled() {
+            warn!(
+                "[ltp-restart-candidate] sysno={:?} raw_sysno={} pre_ip={:#x} post_ip={:#x}",
+                sysno,
+                restart.sysno,
+                restart.pre_syscall_context.ip(),
+                uctx.ip(),
+            );
+        }
+    }
 
     uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).code() as _) as _);
 }

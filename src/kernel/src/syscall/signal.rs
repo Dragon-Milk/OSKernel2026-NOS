@@ -11,13 +11,15 @@ use linux_raw_sys::general::{
     timespec,
 };
 use starry_process::Pid;
-use starry_signal::{SignalInfo, SignalSet, SignalStack, Signo};
+use starry_signal::{SignalAction, SignalInfo, SignalSet, SignalStack, Signo};
 use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{
     task::{
-        AsThread, block_next_signal, check_signals, processes, send_signal_to_process,
-        send_signal_to_process_group, send_signal_to_thread,
+        AsThread, block_next_signal, check_signals, ltp_trace_current_enabled,
+        ltp_trace_proc_label, ltp_trace_signal_set_bits, processes,
+        send_signal_to_process_group_with_source, send_signal_to_process_with_source,
+        send_signal_to_thread_with_source,
     },
     time::TimeValueLike,
 };
@@ -85,7 +87,25 @@ pub fn sys_rt_sigaction(
         oldact.vm_write(actions[signo].clone().into())?;
     }
     if let Some(act) = act.nullable() {
-        let act = unsafe { act.vm_read_uninit()?.assume_init() }.into();
+        let act: SignalAction = unsafe { act.vm_read_uninit()?.assume_init() }.into();
+        if ltp_trace_current_enabled() {
+            let curr = current();
+            let proc_data = &curr.as_thread().proc_data;
+            warn!(
+                "[ltp-sigaction] curr_pid={} curr_tid={} signo={}({:?}) flags={:?} \
+                 flags_bits={:#x} mask_bits={:#018x} mask={:?} disposition={:?} proc={}",
+                proc_data.proc.pid(),
+                curr.id().as_u64(),
+                signo as u8,
+                signo,
+                act.flags,
+                act.flags.bits(),
+                ltp_trace_signal_set_bits(act.mask),
+                act.mask,
+                act.disposition,
+                ltp_trace_proc_label(proc_data),
+            );
+        }
         debug!("sys_rt_sigaction <= signo: {signo:?}, act: {act:?}");
         actions[signo] = act;
     }
@@ -116,11 +136,11 @@ pub fn sys_kill(pid: i32, signo: u32) -> AxResult<isize> {
 
     match pid {
         1.. => {
-            send_signal_to_process(pid as _, sig)?;
+            send_signal_to_process_with_source(pid as _, sig, "sys_kill:pid")?;
         }
         0 => {
             let pgid = current().as_thread().proc_data.proc.group().pgid();
-            send_signal_to_process_group(pgid, sig)?;
+            send_signal_to_process_group_with_source(pgid, sig, "sys_kill:process_group_0")?;
         }
         -1 => {
             let curr_pid = current().as_thread().proc_data.proc.pid();
@@ -134,12 +154,16 @@ pub fn sys_kill(pid: i32, signo: u32) -> AxResult<isize> {
                     if proc_data.proc.is_init() || proc_data.proc.pid() == curr_pid {
                         continue;
                     }
-                    let _ = send_signal_to_process(proc_data.proc.pid(), Some(sig.clone()));
+                    let _ = send_signal_to_process_with_source(
+                        proc_data.proc.pid(),
+                        Some(sig.clone()),
+                        "sys_kill:broadcast",
+                    );
                 }
             }
         }
         ..-1 => {
-            send_signal_to_process_group((-pid) as Pid, sig)?;
+            send_signal_to_process_group_with_source((-pid) as Pid, sig, "sys_kill:process_group")?;
         }
     }
     Ok(0)
@@ -147,13 +171,13 @@ pub fn sys_kill(pid: i32, signo: u32) -> AxResult<isize> {
 
 pub fn sys_tkill(tid: Pid, signo: u32) -> AxResult<isize> {
     let sig = make_siginfo(signo, SI_TKILL)?;
-    send_signal_to_thread(None, tid, sig)?;
+    send_signal_to_thread_with_source(None, tid, sig, "sys_tkill")?;
     Ok(0)
 }
 
 pub fn sys_tgkill(tgid: Pid, tid: Pid, signo: u32) -> AxResult<isize> {
     let sig = make_siginfo(signo, SI_TKILL)?;
-    send_signal_to_thread(Some(tgid), tid, sig)?;
+    send_signal_to_thread_with_source(Some(tgid), tid, sig, "sys_tgkill")?;
     Ok(0)
 }
 
@@ -186,7 +210,7 @@ pub fn sys_rt_sigqueueinfo(
     check_sigset_size(sigsetsize)?;
 
     let sig = make_queue_signal_info(tgid, signo, sig)?;
-    send_signal_to_process(tgid, sig)?;
+    send_signal_to_process_with_source(tgid, sig, "sys_rt_sigqueueinfo")?;
     Ok(0)
 }
 
@@ -200,7 +224,7 @@ pub fn sys_rt_tgsigqueueinfo(
     check_sigset_size(sigsetsize)?;
 
     let sig = make_queue_signal_info(tgid, signo, sig)?;
-    send_signal_to_thread(Some(tgid), tid, sig)?;
+    send_signal_to_thread_with_source(Some(tgid), tid, sig, "sys_rt_tgsigqueueinfo")?;
     Ok(0)
 }
 

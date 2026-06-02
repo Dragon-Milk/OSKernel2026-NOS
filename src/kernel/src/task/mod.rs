@@ -28,6 +28,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering},
 };
 
+use axhal::uspace::UserContext;
 use axpoll::PollSet;
 use axsync::{Mutex, spin::SpinNoIrq};
 use axtask::{TaskExt, TaskInner};
@@ -42,6 +43,12 @@ use starry_signal::{
 
 pub use self::{futex::*, ops::*, resources::*, signal::*, stat::*, timer::*, user::*};
 use crate::mm::AddrSpace;
+
+#[derive(Debug, Clone, Copy)]
+pub struct RestartSyscall {
+    pub pre_syscall_context: UserContext,
+    pub sysno: usize,
+}
 
 ///  A wrapper type that assumes the inner type is `Sync`.
 /// 假设内部类型是 `Sync` 的包装类型。
@@ -110,6 +117,8 @@ pub struct Thread {
     /// Self exit event
     /// 自身退出事件通知。
     pub exit_event: Arc<PollSet>,
+
+    restart_syscall: AssumeSync<RefCell<Option<RestartSyscall>>>,
 }
 
 impl Thread {
@@ -125,6 +134,7 @@ impl Thread {
             oom_score_adj: AtomicI32::new(200),
             accessing_user_memory: AtomicBool::new(false),
             exit_event: Arc::default(),
+            restart_syscall: AssumeSync(RefCell::new(None)),
         })
     }
 
@@ -179,6 +189,18 @@ impl Thread {
     pub fn set_accessing_user_memory(&self, accessing: bool) {
         self.accessing_user_memory
             .store(accessing, Ordering::Release);
+    }
+
+    pub fn set_restart_syscall(&self, restart: RestartSyscall) {
+        *self.restart_syscall.borrow_mut() = Some(restart);
+    }
+
+    pub fn restart_syscall(&self) -> Option<RestartSyscall> {
+        *self.restart_syscall.borrow()
+    }
+
+    pub fn clear_restart_syscall(&self) {
+        *self.restart_syscall.borrow_mut() = None;
     }
 }
 

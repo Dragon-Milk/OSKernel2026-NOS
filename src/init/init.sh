@@ -14,11 +14,12 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # lmbench       : run glibc and musl lmbench only
 # lmbench-only  : run original glibc lmbench script
 # lmbench-fast  : run trimmed glibc lmbench
+# ltp-only      : run glibc and musl ltp only
 # wait-repro    : run wait/libctest/lmbench/unixbench repro
 # full          : scan and run all testcode scripts
 # ============================================================
-SKIP_LTP=${SKIP_LTP:-1}
-TEST_PROFILE=${TEST_PROFILE:-stable}
+SKIP_LTP=${SKIP_LTP:-0}
+TEST_PROFILE=${TEST_PROFILE:-ltp-only}
 
 run_with_shell() {
     script="$1"
@@ -228,6 +229,12 @@ run_lmbench_only_tests() {
     run_test_path /glibc/lmbench_testcode.sh
 }
 
+run_ltp_tests() {
+    found=1
+    run_test_path /glibc/ltp_testcode.sh
+    run_test_path /musl/ltp_testcode.sh
+}
+
 run_lmbench_fast_tests() {
     found=1
     cd /glibc || return
@@ -336,6 +343,9 @@ case "$TEST_PROFILE" in
         ;;
     lmbench-fast)
         run_lmbench_fast_tests
+        ;;
+    ltp-only)
+        run_ltp_tests
         ;;
     lmbench-write)
         run_lmbench_write_tests
