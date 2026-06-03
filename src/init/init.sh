@@ -19,6 +19,7 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # full          : scan and run all testcode scripts
 # ============================================================
 SKIP_LTP=${SKIP_LTP:-0}
+SKIP_LTP_CGROUP_HELPERS=${SKIP_LTP_CGROUP_HELPERS:-1}
 TEST_PROFILE=${TEST_PROFILE:-ltp-only}
 
 run_with_shell() {
@@ -118,6 +119,21 @@ skip_ltp_testcase() {
     echo "#### OS COMP TEST GROUP START $group ####"
     echo "#### OS COMP TEST GROUP END $group ####"
     return 0
+}
+
+skip_ltp_bin_case() {
+    name="$1"
+
+    [ "$SKIP_LTP_CGROUP_HELPERS" = "1" ] || return 1
+
+    case "$name" in
+        cgroup_*.sh|cgroup_fj_proc|cgroup_regression_fork_processes| \
+        cgroup_regression_getdelays|libcgroup_freezer)
+            return 0
+            ;;
+    esac
+
+    return 1
 }
 
 set_library_path() {
@@ -231,8 +247,47 @@ run_lmbench_only_tests() {
 
 run_ltp_tests() {
     found=1
-    run_test_path /glibc/ltp_testcode.sh
-    run_test_path /musl/ltp_testcode.sh
+    run_ltp_dir /glibc ltp-glibc
+    run_ltp_dir /musl ltp-musl
+}
+
+run_ltp_dir() {
+    dir="$1"
+    group="$2"
+    target_dir="ltp/testcases/bin"
+
+    [ -d "$dir/$target_dir" ] || return
+
+    cd "$dir" || return
+    set_library_path "$dir"
+    echo "run ${dir}/ltp_testcode.sh"
+
+    if [ "$SKIP_LTP" = "1" ]; then
+        echo "#### OS COMP TEST GROUP START $group ####"
+        echo "#### OS COMP TEST GROUP END $group ####"
+        cd /
+        return
+    fi
+
+    echo "#### OS COMP TEST GROUP START $group ####"
+
+    for file in "$target_dir"/*; do
+        [ -f "$file" ] || continue
+        name="${file##*/}"
+
+        if skip_ltp_bin_case "$name"; then
+            echo "SKIP LTP CASE $name"
+            continue
+        fi
+
+        echo "RUN LTP CASE $name"
+        "$file"
+        ret=$?
+        echo "FAIL LTP CASE $name : $ret"
+    done
+
+    echo "#### OS COMP TEST GROUP END $group ####"
+    cd /
 }
 
 run_lmbench_fast_tests() {

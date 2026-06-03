@@ -25,6 +25,7 @@ pub struct Clone3Args {
 }
 
 const MIN_CLONE_ARGS_SIZE: usize = core::mem::size_of::<u64>() * 8;
+const SUPPORTED_CLONE_ARGS_SIZE: usize = core::mem::size_of::<Clone3Args>();
 
 impl TryFrom<Clone3Args> for CloneArgs {
     type Error = axerrno::AxError;
@@ -76,15 +77,16 @@ pub fn sys_clone3(uctx: &UserContext, args: *const u8, size: usize) -> AxResult<
         return Err(AxError::InvalidInput);
     }
 
-    if size > core::mem::size_of::<Clone3Args>() {
+    if size > SUPPORTED_CLONE_ARGS_SIZE {
         debug!("sys_clone3: size {size} larger than expected, using known fields only");
     }
 
-    let mut buffer = [0u8; core::mem::size_of::<Clone3Args>()];
+    let mut buffer = [0u8; SUPPORTED_CLONE_ARGS_SIZE];
+    let copy_size = size.min(SUPPORTED_CLONE_ARGS_SIZE);
     // SAFETY: MaybeUninit<T> is compatible with T, and we're filling in the
     // buffer with bytes read from the user
     vm_read_slice(args, unsafe {
-        mem::transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut buffer[..size])
+        mem::transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut buffer[..copy_size])
     })?;
     let clone3_args: Clone3Args =
         bytemuck::try_pod_read_unaligned(&buffer).map_err(|_| AxError::InvalidInput)?;
