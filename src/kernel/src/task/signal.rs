@@ -2,11 +2,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::{AxError, AxResult};
 use axhal::uspace::UserContext;
-use axtask::{TaskInner, current};
-use starry_process::{Pid, Process, init_proc};
+use axtask::{current, TaskInner};
+use starry_process::{init_proc, Pid, Process};
 use starry_signal::{SignalInfo, SignalOSAction, SignalSet};
 
-use super::{AsThread, Thread, do_exit, get_process_data, get_process_group, get_task};
+use super::{do_exit, get_process_data, get_process_group, get_task, AsThread, Thread};
 
 pub fn check_signals(
     thr: &Thread,

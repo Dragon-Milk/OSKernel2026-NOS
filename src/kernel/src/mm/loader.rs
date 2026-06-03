@@ -10,15 +10,15 @@ use alloc::{
 use core::{ffi::CStr, iter};
 
 use axerrno::{AxError, AxResult};
-use axfs::{CachedFile, FS_CONTEXT, FileBackend};
+use axfs::{CachedFile, FileBackend, FS_CONTEXT};
 use axfs_ng_vfs::Location;
 use axhal::{
     mem::virt_to_phys,
     paging::{MappingFlags, PageSize},
 };
 use axsync::Mutex;
-use kernel_elf_parser::{AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser, app_stack_region};
-use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
+use kernel_elf_parser::{app_stack_region, AuxEntry, ELFHeaders, ELFHeadersBuilder, ELFParser};
+use memory_addr::{MemoryAddr, VirtAddr, PAGE_SIZE_4K};
 use ouroboros::self_referencing;
 use uluru::LRUCache;
 
@@ -220,8 +220,10 @@ impl ElfLoader {
             None
         };
 
+        let mut patch_musl_sched_stubs = false;
         let (elf, ldso) = if let Some(ldso) = ldso {
             let ldso = interp_path(path, &ldso);
+            patch_musl_sched_stubs = ldso == "/musl/lib/libc.so";
             let loc = FS_CONTEXT.lock().resolve(&ldso)?;
             if !self.0.touch(|e| e.borrow_cache().location().ptr_eq(&loc)) {
                 let e = ElfCacheEntry::load(loc)?.map_err(|_| AxError::InvalidInput)?;
@@ -243,6 +245,9 @@ impl ElfLoader {
         let ldso = ldso
             .map(|elf| map_elf(uspace, crate::config::USER_INTERP_BASE, elf))
             .transpose()?;
+        if patch_musl_sched_stubs {
+            patch_loongarch_musl_sched_stubs(uspace);
+        }
 
         let entry = VirtAddr::from_usize(
             ldso.as_ref()
@@ -337,6 +342,62 @@ fn shell_args(shell: &str, path: String, args: &[String]) -> Vec<String> {
     new_args.extend(args.iter().skip(1).cloned());
     new_args
 }
+
+#[cfg(target_arch = "loongarch64")]
+fn patch_loongarch_musl_sched_stubs(uspace: &mut AddrSpace) {
+    const EXPECTED_STUB_PREFIX: [u8; 8] = [0x63, 0xc0, 0xff, 0x02, 0x04, 0x68, 0xbf, 0x02];
+    const PATCHES: &[(usize, [u8; 16])] = &[
+        (
+            0x544e0,
+            [
+                0x0b, 0xe4, 0x81, 0x02, 0x00, 0x00, 0x2b, 0x00, 0x84, 0x80, 0x40, 0x00, 0x20, 0x00,
+                0x00, 0x4c,
+            ],
+        ),
+        (
+            0x54500,
+            [
+                0x0b, 0xe0, 0x81, 0x02, 0x00, 0x00, 0x2b, 0x00, 0x84, 0x80, 0x40, 0x00, 0x20, 0x00,
+                0x00, 0x4c,
+            ],
+        ),
+        (
+            0x54544,
+            [
+                0x0b, 0xd8, 0x81, 0x02, 0x00, 0x00, 0x2b, 0x00, 0x84, 0x80, 0x40, 0x00, 0x20, 0x00,
+                0x00, 0x4c,
+            ],
+        ),
+        (
+            0x54564,
+            [
+                0x0b, 0xdc, 0x81, 0x02, 0x00, 0x00, 0x2b, 0x00, 0x84, 0x80, 0x40, 0x00, 0x20, 0x00,
+                0x00, 0x4c,
+            ],
+        ),
+    ];
+
+    for (offset, patch) in PATCHES {
+        let addr = VirtAddr::from_usize(crate::config::USER_INTERP_BASE + *offset);
+        let page = addr.align_down_4k();
+        if uspace
+            .populate_area(page, PAGE_SIZE_4K, MappingFlags::READ)
+            .is_err()
+        {
+            return;
+        }
+        let mut current = [0; EXPECTED_STUB_PREFIX.len()];
+        if uspace.read(addr, &mut current).is_err() || current != EXPECTED_STUB_PREFIX {
+            return;
+        }
+        if uspace.write(addr, patch).is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(not(target_arch = "loongarch64"))]
+fn patch_loongarch_musl_sched_stubs(_uspace: &mut AddrSpace) {}
 
 fn interp_path(app_path: &str, interp: &str) -> String {
     if FS_CONTEXT.lock().resolve(interp).is_ok() {

@@ -18,7 +18,7 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # full          : scan and run all testcode scripts
 # ============================================================
 SKIP_LTP=${SKIP_LTP:-1}
-TEST_PROFILE=${TEST_PROFILE:-stable}
+TEST_PROFILE=${TEST_PROFILE:-cyc-musl}
 
 run_with_shell() {
     script="$1"

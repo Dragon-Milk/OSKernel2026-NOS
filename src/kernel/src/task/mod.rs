@@ -29,15 +29,16 @@ use core::{
 };
 
 use axpoll::PollSet;
-use axsync::{Mutex, spin::SpinNoIrq};
+use axsync::{spin::SpinNoIrq, Mutex};
 use axtask::{TaskExt, TaskInner};
 use extern_trait::extern_trait;
+use linux_raw_sys::general::SCHED_NORMAL;
 use scope_local::{ActiveScope, Scope};
 use spin::RwLock;
 use starry_process::Process;
 use starry_signal::{
-    Signo,
     api::{ProcessSignalManager, SignalActions, ThreadSignalManager},
+    Signo,
 };
 
 pub use self::{futex::*, ops::*, resources::*, signal::*, stat::*, timer::*, user::*};
@@ -95,6 +96,12 @@ pub struct Thread {
     /// 时间管理器，通过 `AssumeSync` 包装，仅在上下文切换时独占访问。
     pub time: AssumeSync<RefCell<TimeManager>>,
 
+    /// Linux-compatible scheduler policy reported by scheduler syscalls.
+    sched_policy: AtomicU32,
+
+    /// Linux-compatible realtime priority reported by scheduler syscalls.
+    sched_priority: AtomicI32,
+
     /// The OOM score adjustment value.
     /// OOM 评分调整值。
     oom_score_adj: AtomicI32,
@@ -121,6 +128,8 @@ impl Thread {
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
             time: AssumeSync(RefCell::new(TimeManager::new())),
+            sched_policy: AtomicU32::new(SCHED_NORMAL),
+            sched_priority: AtomicI32::new(0),
             exit: Arc::new(AtomicBool::new(false)),
             oom_score_adj: AtomicI32::new(200),
             accessing_user_memory: AtomicBool::new(false),
@@ -179,6 +188,19 @@ impl Thread {
     pub fn set_accessing_user_memory(&self, accessing: bool) {
         self.accessing_user_memory
             .store(accessing, Ordering::Release);
+    }
+
+    pub fn sched_policy(&self) -> u32 {
+        self.sched_policy.load(Ordering::SeqCst)
+    }
+
+    pub fn sched_priority(&self) -> i32 {
+        self.sched_priority.load(Ordering::SeqCst)
+    }
+
+    pub fn set_sched_param(&self, policy: u32, priority: i32) {
+        self.sched_policy.store(policy, Ordering::SeqCst);
+        self.sched_priority.store(priority, Ordering::SeqCst);
     }
 }
 

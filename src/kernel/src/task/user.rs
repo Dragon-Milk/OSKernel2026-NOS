@@ -5,7 +5,7 @@ use starry_signal::{SignalInfo, Signo};
 use starry_vm::{VmMutPtr, VmPtr};
 
 use super::{
-    AsThread, TimerState, check_signals, raise_signal_fatal, set_timer_state, unblock_next_signal,
+    check_signals, raise_signal_fatal, set_timer_state, unblock_next_signal, AsThread, TimerState,
 };
 use crate::syscall::handle_syscall;
 

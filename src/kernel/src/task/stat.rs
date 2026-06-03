@@ -1,8 +1,7 @@
-use axhal::time::nanos_to_ticks;
-
 use alloc::{borrow::ToOwned, fmt, string::String};
 
 use axerrno::AxResult;
+use axhal::time::nanos_to_ticks;
 use axtask::{TaskInner, TaskState};
 use starry_signal::Signo;
 
