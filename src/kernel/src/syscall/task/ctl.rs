@@ -10,18 +10,34 @@ use crate::{
     task::{AsThread, get_process_data},
 };
 
+const CAPABILITY_VERSION_1: u32 = 0x19980330;
+const CAPABILITY_VERSION_2: u32 = 0x20071026;
 const CAPABILITY_VERSION_3: u32 = 0x20080522;
 
-fn validate_cap_header(header_ptr: *mut __user_cap_header_struct) -> AxResult<()> {
+fn validate_cap_header(header_ptr: *mut __user_cap_header_struct) -> AxResult<__user_cap_header_struct> {
     // FIXME: AnyBitPattern
     let mut header = unsafe { header_ptr.vm_read_uninit()?.assume_init() };
-    if header.version != CAPABILITY_VERSION_3 {
-        header.version = CAPABILITY_VERSION_3;
-        header_ptr.vm_write(header)?;
-        return Err(AxError::InvalidInput);
+
+    // Accept all three capability versions; upgrade v1/v2 to v3 for the caller
+    match header.version {
+        CAPABILITY_VERSION_1 | CAPABILITY_VERSION_2 => {
+            header.version = CAPABILITY_VERSION_3;
+            header_ptr.vm_write(header)?;
+        }
+        CAPABILITY_VERSION_3 => {}
+        _ => return Err(AxError::InvalidInput),
     }
-    let _ = get_process_data(header.pid as u32)?;
-    Ok(())
+
+    // capget/capset on a non-current process returns EPERM (not ESRCH)
+    if header.pid != 0 {
+        let curr_pid = current().as_thread().proc_data.proc.pid();
+        if header.pid as u32 != curr_pid {
+            // Returning EINVAL for non-existent pid matches Linux behaviour
+            let _ = get_process_data(header.pid as u32).map_err(|_| AxError::InvalidInput)?;
+        }
+    }
+
+    Ok(header)
 }
 
 pub fn sys_capget(
@@ -40,9 +56,23 @@ pub fn sys_capget(
 
 pub fn sys_capset(
     header: *mut __user_cap_header_struct,
-    _data: *mut __user_cap_data_struct,
+    data: *mut __user_cap_data_struct,
 ) -> AxResult<isize> {
-    validate_cap_header(header)?;
+    let header = validate_cap_header(header)?;
+
+    // Only root (or CAP_SETPCAP) can set capabilities on another process
+    if header.pid != 0 {
+        let curr_pid = current().as_thread().proc_data.proc.pid();
+        if header.pid as u32 != curr_pid {
+            return Err(AxError::OperationNotPermitted);
+        }
+    }
+
+    // Validate the requested capability data: inheritable must be a subset of permitted
+    let data = unsafe { data.vm_read_uninit()?.assume_init() };
+    if data.inheritable & !data.permitted != 0 {
+        return Err(AxError::OperationNotPermitted);
+    }
 
     Ok(0)
 }
@@ -109,6 +139,19 @@ pub fn sys_prctl(
         }
         PR_SET_SECCOMP => {}
         PR_MCE_KILL => {}
+        PR_CAPBSET_READ => {
+            // Return 0 (capability not in bounding set) since we don't
+            // implement capabilities.
+            // The result is written to *(int *)arg3.
+            (arg3 as *mut u32).vm_write(0)?;
+        }
+        PR_CAPBSET_DROP => {
+            // Dropping a capability from the bounding set always succeeds
+            // in a non-capability-aware kernel.
+        }
+        PR_CAP_AMBIENT => {
+            // Ambient capabilities are always empty; operations are no-ops.
+        }
         PR_SET_MM => {
             // not implemented; but avoid annoying warnings
             return Err(AxError::InvalidInput);
