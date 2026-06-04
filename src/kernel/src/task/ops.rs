@@ -5,7 +5,7 @@ use alloc::{
 use core::{ffi::c_long, sync::atomic::Ordering};
 
 use axerrno::{AxError, AxResult};
-use axtask::{AxTaskRef, TaskInner, WeakAxTaskRef, current};
+use axtask::{current, AxTaskRef, TaskInner, WeakAxTaskRef};
 use bytemuck::AnyBitPattern;
 use linux_raw_sys::general::ROBUST_LIST_LIMIT;
 use spin::RwLock;
@@ -15,8 +15,8 @@ use starry_vm::{VmMutPtr, VmPtr};
 use weak_map::WeakMap;
 
 use super::{
-    AsThread, FutexKey, ProcessData, TimerState, futex_table_for, send_signal_thread_inner,
-    send_signal_to_process, send_signal_to_thread,
+    futex_table_for, send_signal_thread_inner, send_signal_to_process, send_signal_to_thread,
+    AsThread, FutexKey, ProcessData, TimerState,
 };
 
 static TASK_TABLE: RwLock<WeakMap<Pid, WeakAxTaskRef>> = RwLock::new(WeakMap::new());

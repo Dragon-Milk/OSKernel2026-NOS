@@ -3,12 +3,13 @@
 use alloc::{borrow::ToOwned, collections::binary_heap::BinaryHeap, sync::Arc};
 use core::{mem, time::Duration};
 
-use axhal::time::{NANOS_PER_SEC, TimeValue, monotonic_time_nanos, wall_time};
+use axhal::time::{monotonic_time_nanos, wall_time, TimeValue, NANOS_PER_SEC};
 use axtask::{
-    WeakAxTaskRef, current,
+    current,
     future::{block_on, timeout_at},
+    WeakAxTaskRef,
 };
-use event_listener::{Event, listener};
+use event_listener::{listener, Event};
 use lazy_static::lazy_static;
 use spin::Mutex;
 use starry_signal::Signo;
