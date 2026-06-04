@@ -91,7 +91,7 @@ pub fn sys_rt_sigaction(
         if ltp_trace_current_enabled() {
             let curr = current();
             let proc_data = &curr.as_thread().proc_data;
-            warn!(
+            debug!(
                 "[ltp-sigaction] curr_pid={} curr_tid={} signo={}({:?}) flags={:?} \
                  flags_bits={:#x} mask_bits={:#018x} mask={:?} disposition={:?} proc={}",
                 proc_data.proc.pid(),

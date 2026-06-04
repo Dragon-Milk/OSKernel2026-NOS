@@ -131,7 +131,7 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isiz
                         } else {
                             if ltp_trace_current_enabled() {
                                 let thread = curr.as_thread();
-                                warn!(
+                                debug!(
                                     "[ltp-wait-eintr] curr_pid={} curr_tid={} wait_raw_pid={} \
                                      wait={:?} options={:?} pending_bits={:#018x} pending={:?} \
                                      blocked_bits={:#018x} blocked={:?} deliverable_bits={:#018x} \

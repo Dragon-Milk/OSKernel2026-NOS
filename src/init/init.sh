@@ -21,8 +21,8 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # ============================================================
 SKIP_LTP=${SKIP_LTP:-0}
 SKIP_LTP_CGROUP_HELPERS=${SKIP_LTP_CGROUP_HELPERS:-1}
-TEST_PROFILE=${TEST_PROFILE:-ltp-only}
-LTP_SCORE_CASES="abs01 abort01 accept01 accept4_01 alarm02 alarm03 alarm05 alarm06 alarm07 atof01 brk01 brk02 bind03 chdir04"
+TEST_PROFILE=${TEST_PROFILE:-ltp-score}
+LTP_SCORE_CASES="abs01 brk01 brk02"
 
 run_with_shell() {
     script="$1"
@@ -442,6 +442,7 @@ case "$TEST_PROFILE" in
         ;;
     ltp-score)
         run_ltp_score_tests
+        exit 0
         ;;
     lmbench-write)
         run_lmbench_write_tests

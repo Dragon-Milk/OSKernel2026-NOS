@@ -90,7 +90,7 @@ fn ltp_trace_signal_delivery(
     let target_label = target_proc_data
         .map(ltp_trace_proc_label)
         .unwrap_or_else(|| "<unknown>".into());
-    warn!(
+    debug!(
         "[ltp-sigtrace] source={} target={} target_pid={} target_tid={:?} signal={}({:?}) code={} \
          curr_pid={} curr_tid={} curr={} target={}",
         source,
@@ -123,7 +123,7 @@ pub fn check_signals(
     if let Some(restart) = restart_syscall {
         thr.clear_restart_syscall();
         if ltp_trace_proc_enabled(&thr.proc_data) {
-            warn!(
+            debug!(
                 "[ltp-restart] signal={}({:?}) os_action={:?} sysno={} restarted={} proc={}",
                 sig.signo() as u8,
                 sig.signo(),

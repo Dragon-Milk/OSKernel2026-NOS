@@ -686,7 +686,7 @@ pub fn handle_syscall(uctx: &mut UserContext) {
     {
         thr.set_restart_syscall(restart);
         if ltp_trace_current_enabled() {
-            warn!(
+            debug!(
                 "[ltp-restart-candidate] sysno={:?} raw_sysno={} pre_ip={:#x} post_ip={:#x}",
                 sysno,
                 restart.sysno,
