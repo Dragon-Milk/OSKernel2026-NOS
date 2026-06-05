@@ -14,11 +14,12 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # lmbench       : run glibc and musl lmbench only
 # lmbench-only  : run original glibc lmbench script
 # lmbench-fast  : run trimmed glibc lmbench
+# unixbench     : run glibc and musl unixbench only
 # wait-repro    : run wait/libctest/lmbench/unixbench repro
 # full          : scan and run all testcode scripts
 # ============================================================
 SKIP_LTP=${SKIP_LTP:-1}
-TEST_PROFILE=${TEST_PROFILE:-cyc-musl}
+TEST_PROFILE=${TEST_PROFILE:-unixbench}
 
 run_with_shell() {
     script="$1"
@@ -282,6 +283,12 @@ run_lmbench_write_tests() {
     cd /
 }
 
+run_unixbench_tests() {
+    found=1
+    run_test_path /glibc/unixbench_testcode.sh
+    run_test_path /musl/unixbench_testcode.sh
+}
+
 run_wait_repro_tests() {
     for testcase in \
         /glibc/libctest_testcode.sh \
@@ -308,6 +315,9 @@ cd /
 
 # --- cyclictest only (NO_STRESS + STRESS) ---
 # set_library_path /glibc && cd /glibc && run_with_shell ./cyclictest_testcode.sh
+
+# --- unixbench only ---
+# set_library_path /glibc && cd /glibc && run_with_shell ./unixbench_testcode.sh
 
 # --- full test suite (comment out the single test above) ---
 found=0
@@ -339,6 +349,9 @@ case "$TEST_PROFILE" in
         ;;
     lmbench-write)
         run_lmbench_write_tests
+        ;;
+    unixbench)
+        run_unixbench_tests
         ;;
     wait-repro)
         run_wait_repro_tests
