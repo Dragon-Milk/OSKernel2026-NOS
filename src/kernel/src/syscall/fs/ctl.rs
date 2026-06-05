@@ -518,11 +518,9 @@ pub fn sys_renameat2(
 }
 
 pub fn sys_sync() -> AxResult<isize> {
-    warn!("dummy sys_sync");
     Ok(0)
 }
 
 pub fn sys_syncfs(_fd: i32) -> AxResult<isize> {
-    warn!("dummy sys_syncfs");
     Ok(0)
 }
