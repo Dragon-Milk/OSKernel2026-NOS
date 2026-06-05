@@ -11,6 +11,7 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # cyc-musl      : run musl cyclictest only
 # cyc-all       : run glibc and musl cyclictest only
 # libctest      : run glibc and musl libctest only
+# iozone        : run glibc and musl iozone to verify sys_sync/syncfs
 # lmbench       : run glibc and musl lmbench only
 # lmbench-only  : run original glibc lmbench script
 # lmbench-fast  : run trimmed glibc lmbench
@@ -18,7 +19,7 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # full          : scan and run all testcode scripts
 # ============================================================
 SKIP_LTP=${SKIP_LTP:-1}
-TEST_PROFILE=${TEST_PROFILE:-cyc-musl}
+TEST_PROFILE=${TEST_PROFILE:-stable}
 
 run_with_shell() {
     script="$1"
@@ -218,6 +219,13 @@ run_libctest_tests() {
     run_test_path /musl/libctest_testcode.sh
 }
 
+run_iozone_tests() {
+    found=1
+    echo "run iozone tests for sys_sync/syncfs verification"
+    run_test_path /glibc/iozone_testcode.sh
+    run_test_path /musl/iozone_testcode.sh
+}
+
 run_lmbench_tests() {
     found=1
     run_test_path /glibc/lmbench_testcode.sh
@@ -327,6 +335,9 @@ case "$TEST_PROFILE" in
         ;;
     libctest)
         run_libctest_tests
+        ;;
+    iozone)
+        run_iozone_tests
         ;;
     lmbench)
         run_lmbench_tests
