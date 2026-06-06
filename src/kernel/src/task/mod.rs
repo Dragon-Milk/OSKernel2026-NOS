@@ -72,6 +72,9 @@ pub struct Thread {
     /// 进程内所有线程共享的数据。
     pub proc_data: Arc<ProcessData>,
 
+    /// Cached process ID for fast sys_getpid.
+    pub pid: u32,
+
     /// The clear thread tid field
     ///
     /// See <https://manpages.debian.org/unstable/manpages-dev/set_tid_address.2.en.html#clear_child_tid>
@@ -122,9 +125,11 @@ pub struct Thread {
 impl Thread {
     /// Create a new [`Thread`].
     pub fn new(tid: u32, proc_data: Arc<ProcessData>) -> Box<Self> {
+        let pid = proc_data.proc.pid();
         Box::new(Thread {
             signal: ThreadSignalManager::new(tid, proc_data.signal.clone()),
             proc_data,
+            pid,
             clear_child_tid: AtomicUsize::new(0),
             robust_list_head: AtomicUsize::new(0),
             time: AssumeSync(RefCell::new(TimeManager::new())),

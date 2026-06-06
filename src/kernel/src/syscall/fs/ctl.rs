@@ -518,14 +518,11 @@ pub fn sys_renameat2(
 }
 
 pub fn sys_sync() -> AxResult<isize> {
-    debug!("sys_sync");
     FS_CONTEXT.lock().root_dir().filesystem().flush()?;
     Ok(0)
 }
 
 pub fn sys_syncfs(fd: i32) -> AxResult<isize> {
-    debug!("sys_syncfs <= fd: {fd}");
-
     let file_like = get_file_like(fd)?;
     let loc = if let Some(file) = file_like.downcast_ref::<File>() {
         file.inner().location()
