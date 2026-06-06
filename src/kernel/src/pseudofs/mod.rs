@@ -65,6 +65,10 @@ pub fn mount_all() -> LinuxResult<()> {
     mount_at(&fs, "/dev", dev::new_devfs())?;
     mount_at(&fs, "/dev/shm", tmp::MemoryFs::new())?;
     mount_at(&fs, "/tmp", tmp::MemoryFs::new())?;
+    if fs.resolve("/var").is_err() {
+        fs.create_dir("/var", DIR_PERMISSION)?;
+    }
+    mount_at(&fs, "/var/tmp", tmp::MemoryFs::new())?;
     mount_at(&fs, "/proc", proc::new_procfs())?;
 
     mount_at(&fs, "/sys", tmp::MemoryFs::new())?;
