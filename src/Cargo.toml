@@ -50,6 +50,7 @@ repository.workspace = true
 
 [features]
 default = []
+perf-profile = ["starry-kernel/perf-profile"]
 qemu = [
     "axfeat/defplat",
 

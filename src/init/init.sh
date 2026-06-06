@@ -15,6 +15,7 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # lmbench       : run glibc and musl lmbench only
 # lmbench-only  : run original glibc lmbench script
 # lmbench-fast  : run trimmed glibc lmbench
+# perf          : run stable profile with kernel-side perf summary when built with perf-profile
 # unixbench     : run glibc and musl unixbench only
 # wait-repro    : run wait/libctest/lmbench/unixbench repro
 # full          : scan and run all testcode scripts
@@ -357,6 +358,9 @@ case "$TEST_PROFILE" in
         ;;
     lmbench-fast)
         run_lmbench_fast_tests
+        ;;
+    perf)
+        run_stable_tests
         ;;
     lmbench-write)
         run_lmbench_write_tests

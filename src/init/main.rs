@@ -13,7 +13,7 @@ pub const CMDLINES: &[&[&str]] = &[
 
 #[unsafe(no_mangle)]
 fn main() {
-    let envs: [&str; 0] = [];
+    let envs = [concat!("TEST_PROFILE=", env!("TEST_PROFILE"))];
 
     starry_kernel::entry::init(CMDLINES, &envs);
 }

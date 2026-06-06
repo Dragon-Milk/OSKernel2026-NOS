@@ -23,6 +23,12 @@ kernel-la:
 run:
 	@$(MAKE) -C $(SRC_DIR) A=$(SRC_DIR) TARGET_DIR=$(SRC_DIR)/target OUT_CONFIG=$(RUN_OUT_CONFIG) $@
 
+perf-rv:
+	@$(MAKE) -C $(SRC_DIR) A=$(SRC_DIR) TARGET_DIR=$(SRC_DIR)/target OUT_CONFIG=$(RV_OUT_CONFIG) ARCH=riscv64 TEST_PROFILE=perf run
+
+perf-la:
+	@$(MAKE) -C $(SRC_DIR) A=$(SRC_DIR) TARGET_DIR=$(SRC_DIR)/target OUT_CONFIG=$(LA_OUT_CONFIG) ARCH=loongarch64 TEST_PROFILE=perf run
+
 clean:
 	@$(MAKE) -C $(SRC_DIR)/make \
 		APP=$(SRC_DIR) \
@@ -34,4 +40,4 @@ clean:
 		$(SRC_DIR)/.axconfig-riscv64.toml $(SRC_DIR)/.axconfig-riscv64.old.toml \
 		$(SRC_DIR)/.axconfig-loongarch64.toml $(SRC_DIR)/.axconfig-loongarch64.old.toml
 
-.PHONY: all kernel-rv kernel-la run clean
+.PHONY: all kernel-rv kernel-la run clean perf-rv perf-la

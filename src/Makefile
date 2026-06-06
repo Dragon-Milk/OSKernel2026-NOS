@@ -13,6 +13,7 @@ export NET := y
 export VSOCK := n
 export MEM := 1G
 export ICOUNT := n
+export TEST_PROFILE := full
 
 # Generated Options
 export A := $(CURDIR)
@@ -26,6 +27,11 @@ export APP_FEATURES := qemu
 
 ifeq ($(MEMTRACK), y)
 	APP_FEATURES += starry-api/memtrack
+endif
+
+ifeq ($(TEST_PROFILE), perf)
+	LOG := trace
+	APP_FEATURES += perf-profile
 endif
 
 default: build
@@ -87,7 +93,13 @@ rv:
 la:
 	$(MAKE) ARCH=loongarch64 OUT_CONFIG=$(LA_OUT_CONFIG) run
 
+perf-rv:
+	$(MAKE) ARCH=riscv64 OUT_CONFIG=$(RV_OUT_CONFIG) TEST_PROFILE=perf run
+
+perf-la:
+	$(MAKE) ARCH=loongarch64 OUT_CONFIG=$(LA_OUT_CONFIG) TEST_PROFILE=perf run
+
 vf2:
 	$(MAKE) ARCH=riscv64 APP_FEATURES=vf2 MYPLAT=axplat-riscv64-visionfive2 BUS=mmio build
 
-.PHONY: all kernel-rv kernel-la build run justrun debug disasm clean
+.PHONY: all kernel-rv kernel-la build run justrun debug disasm clean perf-rv perf-la
