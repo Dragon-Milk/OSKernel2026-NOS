@@ -1,10 +1,11 @@
 use core::sync::atomic::Ordering;
 
 use axerrno::{AxError, AxResult, LinuxError};
+use axhal::time::{monotonic_time_nanos, wall_time_nanos};
 use axtask::current;
 use linux_raw_sys::general::{
-    FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE,
-    FUTEX_WAKE_BITSET, robust_list_head, timespec,
+    FUTEX_CLOCK_REALTIME, FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_REQUEUE, FUTEX_WAIT,
+    FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, robust_list_head, timespec,
 };
 use starry_vm::{VmMutPtr, VmPtr};
 
@@ -49,7 +50,21 @@ pub fn sys_futex(
             let timeout = if let Some(ts) = timeout.nullable() {
                 // FIXME: AnyBitPattern
                 let ts = unsafe { ts.vm_read_uninit()?.assume_init() }.try_into_time_value()?;
-                Some(ts)
+                if command == FUTEX_WAIT_BITSET {
+                    let now = if (futex_op & FUTEX_CLOCK_REALTIME) != 0 {
+                        wall_time_nanos()
+                    } else {
+                        monotonic_time_nanos()
+                    } as u128;
+                    let deadline = ts.as_nanos();
+                    if deadline <= now {
+                        return Err(AxError::TimedOut);
+                    }
+                    let timeout = (deadline - now).min(u64::MAX as u128) as u64;
+                    Some(core::time::Duration::from_nanos(timeout))
+                } else {
+                    Some(ts)
+                }
             } else {
                 None
             };
