@@ -14,7 +14,7 @@ use starry_vm::VmMutPtr;
 use crate::{
     file::{FD_TABLE, FileLike, PidFd, close_file_like},
     mm::copy_from_kernel,
-    task::{AsThread, ProcessData, Thread, add_task_to_table, new_user_task},
+    task::{AsThread, ProcessData, Thread, add_task_to_table, add_thread_to_table, new_user_task},
 };
 
 bitflags! {
@@ -274,7 +274,11 @@ impl CloneArgs {
         *new_task.task_ext_mut() = Some(AxTaskExt::from_impl(thr));
 
         let task = spawn_task(new_task);
-        add_task_to_table(&task);
+        if flags.contains(CloneFlags::THREAD) {
+            add_thread_to_table(&task);
+        } else {
+            add_task_to_table(&task);
+        }
 
         Ok(tid as _)
     }

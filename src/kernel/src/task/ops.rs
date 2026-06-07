@@ -70,6 +70,12 @@ pub fn add_task_to_table(task: &AxTaskRef) {
     session_table.insert(session.sid(), &session);
 }
 
+/// Add only a thread task to the global task table.
+pub fn add_thread_to_table(task: &AxTaskRef) {
+    let tid = task.id().as_u64() as Pid;
+    TASK_TABLE.write().insert(tid, task);
+}
+
 /// Lists all tasks.
 pub fn tasks() -> Vec<AxTaskRef> {
     TASK_TABLE.read().values().collect()
@@ -205,13 +211,12 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
 
     let clear_child_tid = thr.clear_child_tid() as *mut u32;
     if clear_child_tid.vm_write(0).is_ok() {
-        let key = FutexKey::new_current(clear_child_tid as usize);
+        let key = FutexKey::new_private(clear_child_tid as usize);
         let table = futex_table_for(&key);
         let guard = table.get(&key);
         if let Some(futex) = guard {
             futex.wq.wake(1, u32::MAX);
         }
-        axtask::yield_now();
     }
     let head = thr.robust_list_head() as *const RobustListHead;
     if !head.is_null()

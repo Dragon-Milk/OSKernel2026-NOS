@@ -103,6 +103,10 @@ impl ITimer {
         }
     }
 
+    fn is_active(&self) -> bool {
+        self.remained_ns > 0
+    }
+
     pub fn renew_timer(&self) {
         if self.remained_ns > 0 {
             let deadline = wall_time() + Duration::from_nanos(self.remained_ns as u64);
@@ -170,19 +174,26 @@ impl TimeManager {
     pub fn poll(&mut self, emitter: impl Fn(Signo)) {
         let now_ns = monotonic_time_nanos() as usize;
         let delta = now_ns - self.last_wall_ns;
+        let has_itimer = self.itimers.iter().any(ITimer::is_active);
         match self.state {
             TimerState::User => {
                 self.utime_ns += delta;
-                self.update_itimer(ITimerType::Virtual, delta, &emitter);
-                self.update_itimer(ITimerType::Prof, delta, &emitter);
+                if has_itimer {
+                    self.update_itimer(ITimerType::Virtual, delta, &emitter);
+                    self.update_itimer(ITimerType::Prof, delta, &emitter);
+                }
             }
             TimerState::Kernel => {
                 self.stime_ns += delta;
-                self.update_itimer(ITimerType::Prof, delta, &emitter);
+                if has_itimer {
+                    self.update_itimer(ITimerType::Prof, delta, &emitter);
+                }
             }
             TimerState::None => {}
         }
-        self.update_itimer(ITimerType::Real, delta, &emitter);
+        if has_itimer {
+            self.update_itimer(ITimerType::Real, delta, &emitter);
+        }
         self.last_wall_ns = now_ns;
     }
 

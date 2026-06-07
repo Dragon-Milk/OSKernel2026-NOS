@@ -122,6 +122,11 @@ pub enum FutexKey {
 }
 
 impl FutexKey {
+    /// Creates a private futex key without inspecting the address space.
+    pub fn new_private(address: usize) -> Self {
+        Self::Private { address }
+    }
+
     /// Creates a new `FutexKey`.
     pub fn new(aspace: &AddrSpace, address: usize) -> Self {
         if let Some(area) = aspace.find_area(VirtAddr::from_usize(address)) {

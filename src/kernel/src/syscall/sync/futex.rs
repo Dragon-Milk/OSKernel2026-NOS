@@ -3,8 +3,8 @@ use core::sync::atomic::Ordering;
 use axerrno::{AxError, AxResult, LinuxError};
 use axtask::current;
 use linux_raw_sys::general::{
-    FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_REQUEUE, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAKE,
-    FUTEX_WAKE_BITSET, robust_list_head, timespec,
+    FUTEX_CMD_MASK, FUTEX_CMP_REQUEUE, FUTEX_PRIVATE_FLAG, FUTEX_REQUEUE, FUTEX_WAIT,
+    FUTEX_WAIT_BITSET, FUTEX_WAKE, FUTEX_WAKE_BITSET, robust_list_head, timespec,
 };
 use starry_vm::{VmMutPtr, VmPtr};
 
@@ -34,7 +34,12 @@ pub fn sys_futex(
          value3: {value3}",
     );
 
-    let key = FutexKey::new_current(uaddr.addr());
+    let private = futex_op & FUTEX_PRIVATE_FLAG != 0;
+    let key = if private {
+        FutexKey::new_private(uaddr.addr())
+    } else {
+        FutexKey::new_current(uaddr.addr())
+    };
 
     let futex_table = futex_table_for(&key);
 
@@ -86,7 +91,6 @@ pub fn sys_futex(
                 };
                 count = futex.wq.wake(value as _, bitset);
             }
-            axtask::yield_now();
             Ok(count as _)
         }
         FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
@@ -97,7 +101,11 @@ pub fn sys_futex(
             let value2 = assert_unsigned(timeout.addr() as u32)?;
 
             let futex = futex_table.get(&key);
-            let key2 = FutexKey::new_current(uaddr2.addr());
+            let key2 = if private {
+                FutexKey::new_private(uaddr2.addr())
+            } else {
+                FutexKey::new_current(uaddr2.addr())
+            };
             let table2 = futex_table_for(&key2);
             let futex2 = table2.get_or_insert(&key2);
 
