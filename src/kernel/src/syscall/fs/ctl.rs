@@ -6,18 +6,18 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use axfs::{FS_CONTEXT, FsContext};
-use axfs_ng_vfs::{MetadataUpdate, NodePermission, NodeType, path::Path};
+use axfs::{FsContext, FS_CONTEXT};
+use axfs_ng_vfs::{path::Path, MetadataUpdate, NodePermission, NodeType};
 use axhal::time::wall_time;
 use axtask::current;
 use linux_raw_sys::{
     general::*,
     ioctl::{FIONBIO, TIOCGWINSZ},
 };
-use starry_vm::{VmPtr, vm_write_slice};
+use starry_vm::{vm_write_slice, VmPtr};
 
 use crate::{
-    file::{Directory, FileLike, get_file_like, resolve_at, with_fs},
+    file::{get_file_like, resolve_at, with_fs, Directory, File, FileLike},
     mm::vm_load_string,
     task::AsThread,
     time::TimeValueLike,
@@ -94,11 +94,11 @@ pub fn sys_mkdirat(dirfd: i32, path: *const c_char, mode: u32) -> AxResult<isize
     let mode = NodePermission::from_bits_truncate(mode as u16);
 
     with_fs(dirfd, |fs| {
-    if fs.resolve(&path).is_ok() {
-        return Err(AxError::AlreadyExists);
-    }
-    fs.create_dir(path, mode)?;
-    Ok(0)
+        if fs.resolve(&path).is_ok() {
+            return Err(AxError::AlreadyExists);
+        }
+        fs.create_dir(path, mode)?;
+        Ok(0)
     })
 }
 
@@ -518,9 +518,20 @@ pub fn sys_renameat2(
 }
 
 pub fn sys_sync() -> AxResult<isize> {
+    FS_CONTEXT.lock().root_dir().filesystem().flush()?;
     Ok(0)
 }
 
-pub fn sys_syncfs(_fd: i32) -> AxResult<isize> {
+pub fn sys_syncfs(fd: i32) -> AxResult<isize> {
+    let file_like = get_file_like(fd)?;
+    let loc = if let Some(file) = file_like.downcast_ref::<File>() {
+        file.inner().location()
+    } else if let Some(dir) = file_like.downcast_ref::<Directory>() {
+        dir.inner()
+    } else {
+        return Err(AxError::BadFileDescriptor);
+    };
+
+    loc.filesystem().flush()?;
     Ok(0)
 }

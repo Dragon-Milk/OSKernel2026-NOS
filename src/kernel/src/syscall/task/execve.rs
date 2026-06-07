@@ -65,6 +65,7 @@ pub fn sys_execve(
         curr.set_name(path.rsplit('/').next().unwrap_or(&path));
         *proc_data.exe_path.write() = path.to_string();
     }
+    crate::perf::perf_begin_process_exec(proc_data.proc.pid() as u64, path.as_str(), &args);
     *proc_data.cmdline.write() = Arc::new(args);
 
     proc_data.set_heap_top(USER_HEAP_BASE);

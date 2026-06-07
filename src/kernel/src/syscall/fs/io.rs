@@ -62,14 +62,17 @@ pub fn sys_readv(fd: i32, iov: *const IoVec, iovcnt: usize) -> AxResult<isize> {
 /// Return the written size if success.
 pub fn sys_write(fd: i32, buf: *mut u8, len: usize) -> AxResult<isize> {
     debug!("sys_write <= fd: {fd}, buf: {buf:p}, len: {len}");
-    Ok(get_file_like(fd)?.write(&mut VmBytes::new(buf, len))? as _)
+    let written = get_file_like(fd)?.write(&mut VmBytes::new(buf, len))?;
+    crate::perf::perf_observe_user_write(fd, buf, written);
+    Ok(written as _)
 }
 
 pub fn sys_writev(fd: i32, iov: *const IoVec, iovcnt: usize) -> AxResult<isize> {
     debug!("sys_writev <= fd: {fd}, iovcnt: {iovcnt}");
     let f = get_file_like(fd)?;
-    f.write(&mut IoVectorBuf::new(iov, iovcnt)?.into_io())
-        .map(|n| n as _)
+    let written = f.write(&mut IoVectorBuf::new(iov, iovcnt)?.into_io())?;
+    crate::perf::perf_observe_user_writev(fd, iov, iovcnt, written);
+    Ok(written as _)
 }
 
 pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> AxResult<isize> {

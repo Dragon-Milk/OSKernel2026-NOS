@@ -3,6 +3,9 @@ export ARCH := riscv64
 export LOG := warn
 export DWARF := y
 export MEMTRACK := n
+export RUSTUP_DIST_SERVER := https://mirrors.ustc.edu.cn/rust-static
+export RUSTUP_UPDATE_ROOT := https://mirrors.ustc.edu.cn/rust-static/rustup
+export CARGO_NET_OFFLINE := true
 
 # QEMU Options
 export BLK := y
@@ -10,17 +13,25 @@ export NET := y
 export VSOCK := n
 export MEM := 1G
 export ICOUNT := n
+export TEST_PROFILE := full
 
 # Generated Options
 export A := $(CURDIR)
 export TARGET_DIR ?= $(CURDIR)/target
-export OUT_CONFIG ?= $(CURDIR)/.axconfig.toml
+export OUT_CONFIG ?= $(CURDIR)/.axconfig-$(ARCH).toml
+export RV_OUT_CONFIG ?= $(CURDIR)/.axconfig-riscv64.toml
+export LA_OUT_CONFIG ?= $(CURDIR)/.axconfig-loongarch64.toml
 export NO_AXSTD := y
 export AX_LIB := axfeat
 export APP_FEATURES := qemu
 
 ifeq ($(MEMTRACK), y)
 	APP_FEATURES += starry-api/memtrack
+endif
+
+ifeq ($(TEST_PROFILE), perf)
+	LOG := trace
+	APP_FEATURES += perf-profile
 endif
 
 default: build
@@ -38,11 +49,11 @@ endif
 all: kernel-rv kernel-la
 
 kernel-rv:
-	@$(MAKE) ARCH=riscv64 BUS=mmio LD_SCRIPT=$(RV_LD_SCRIPT) build
+	@$(MAKE) ARCH=riscv64 BUS=mmio LD_SCRIPT=$(RV_LD_SCRIPT) OUT_CONFIG=$(RV_OUT_CONFIG) build
 	@cp $(RV_ELF) $@
 
 kernel-la:
-	@$(MAKE) ARCH=loongarch64 BUS=pci LD_SCRIPT=$(LA_LD_SCRIPT) build
+	@$(MAKE) ARCH=loongarch64 BUS=pci LD_SCRIPT=$(LA_LD_SCRIPT) OUT_CONFIG=$(LA_OUT_CONFIG) build
 	@cp $(LA_ELF) $@
 
 ROOTFS_URL = https://github.com/Starry-OS/rootfs/releases/download/20260214
@@ -65,7 +76,9 @@ defconfig justrun:
 
 clean:
 	@$(MAKE) -C make $@
-	@rm -f kernel-rv kernel-la
+	@rm -f kernel-rv kernel-la \
+		$(RV_OUT_CONFIG) $(CURDIR)/.axconfig-riscv64.old.toml \
+		$(LA_OUT_CONFIG) $(CURDIR)/.axconfig-loongarch64.old.toml
 
 build run debug disasm: defconfig
 	@$(MAKE) -C make $@
@@ -75,12 +88,18 @@ ci-test:
 
 # Aliases
 rv:
-	$(MAKE) ARCH=riscv64 run
+	$(MAKE) ARCH=riscv64 OUT_CONFIG=$(RV_OUT_CONFIG) run
 
 la:
-	$(MAKE) ARCH=loongarch64 run
+	$(MAKE) ARCH=loongarch64 OUT_CONFIG=$(LA_OUT_CONFIG) run
+
+perf-rv:
+	$(MAKE) ARCH=riscv64 OUT_CONFIG=$(RV_OUT_CONFIG) TEST_PROFILE=perf run
+
+perf-la:
+	$(MAKE) ARCH=loongarch64 OUT_CONFIG=$(LA_OUT_CONFIG) TEST_PROFILE=perf run
 
 vf2:
 	$(MAKE) ARCH=riscv64 APP_FEATURES=vf2 MYPLAT=axplat-riscv64-visionfive2 BUS=mmio build
 
-.PHONY: all kernel-rv kernel-la build run justrun debug disasm clean
+.PHONY: all kernel-rv kernel-la build run justrun debug disasm clean perf-rv perf-la
