@@ -15,13 +15,15 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # lmbench       : run glibc and musl lmbench only
 # lmbench-only  : run original glibc lmbench script
 # lmbench-fast  : run trimmed glibc lmbench
-# perf          : run stable profile with kernel-side perf summary when built with perf-profile
-# unixbench     : run glibc and musl unixbench only
+# ltp-only      : run glibc and musl ltp only
+# ltp-score     : run a small whitelist of fast LTP cases
 # wait-repro    : run wait/libctest/lmbench/unixbench repro
 # full          : scan and run all testcode scripts
 # ============================================================
-SKIP_LTP=${SKIP_LTP:-1}
-TEST_PROFILE=${TEST_PROFILE:-full}
+SKIP_LTP=${SKIP_LTP:-0}
+SKIP_LTP_CGROUP_HELPERS=${SKIP_LTP_CGROUP_HELPERS:-1}
+TEST_PROFILE=${TEST_PROFILE:-ltp-score}
+LTP_SCORE_CASES="abs01 brk01 brk02"
 
 run_with_shell() {
     script="$1"
@@ -120,6 +122,21 @@ skip_ltp_testcase() {
     echo "#### OS COMP TEST GROUP START $group ####"
     echo "#### OS COMP TEST GROUP END $group ####"
     return 0
+}
+
+skip_ltp_bin_case() {
+    name="$1"
+
+    [ "$SKIP_LTP_CGROUP_HELPERS" = "1" ] || return 1
+
+    case "$name" in
+        cgroup_*.sh|cgroup_fj_proc|cgroup_regression_fork_processes| \
+        cgroup_regression_getdelays|libcgroup_freezer)
+            return 0
+            ;;
+    esac
+
+    return 1
 }
 
 set_library_path() {
@@ -236,6 +253,87 @@ run_lmbench_tests() {
 
 run_lmbench_only_tests() {
     run_test_path /glibc/lmbench_testcode.sh
+}
+
+run_ltp_tests() {
+    found=1
+    run_ltp_dir /glibc ltp-glibc
+    run_ltp_dir /musl ltp-musl
+}
+
+run_ltp_score_tests() {
+    found=1
+    run_ltp_score_dir /glibc ltp-glibc
+    run_ltp_score_dir /musl ltp-musl
+}
+
+run_ltp_score_dir() {
+    dir="$1"
+    group="$2"
+    target_dir="ltp/testcases/bin"
+
+    echo "run ${dir}/ltp-score"
+    echo "#### OS COMP TEST GROUP START $group ####"
+
+    if [ -d "$dir/$target_dir" ] && cd "$dir"; then
+        set_library_path "$dir"
+
+        for name in $LTP_SCORE_CASES; do
+            file="$target_dir/$name"
+            if [ ! -f "$file" ]; then
+                echo "SKIP LTP CASE $name"
+                continue
+            fi
+
+            echo "RUN LTP CASE $name"
+            "$file"
+            ret=$?
+            echo "FAIL LTP CASE $name : $ret"
+        done
+
+        cd /
+    fi
+
+    echo "#### OS COMP TEST GROUP END $group ####"
+}
+
+run_ltp_dir() {
+    dir="$1"
+    group="$2"
+    target_dir="ltp/testcases/bin"
+
+    [ -d "$dir/$target_dir" ] || return
+
+    cd "$dir" || return
+    set_library_path "$dir"
+    echo "run ${dir}/ltp_testcode.sh"
+
+    if [ "$SKIP_LTP" = "1" ]; then
+        echo "#### OS COMP TEST GROUP START $group ####"
+        echo "#### OS COMP TEST GROUP END $group ####"
+        cd /
+        return
+    fi
+
+    echo "#### OS COMP TEST GROUP START $group ####"
+
+    for file in "$target_dir"/*; do
+        [ -f "$file" ] || continue
+        name="${file##*/}"
+
+        if skip_ltp_bin_case "$name"; then
+            echo "SKIP LTP CASE $name"
+            continue
+        fi
+
+        echo "RUN LTP CASE $name"
+        "$file"
+        ret=$?
+        echo "FAIL LTP CASE $name : $ret"
+    done
+
+    echo "#### OS COMP TEST GROUP END $group ####"
+    cd /
 }
 
 run_lmbench_fast_tests() {
@@ -358,9 +456,6 @@ case "$TEST_PROFILE" in
         ;;
     lmbench-fast)
         run_lmbench_fast_tests
-        ;;
-    perf)
-        run_stable_tests
         ;;
     lmbench-write)
         run_lmbench_write_tests

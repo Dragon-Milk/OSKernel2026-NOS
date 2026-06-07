@@ -70,18 +70,19 @@ impl ThreadSignalManager {
         restore_blocked: SignalSet,
         sig: &SignalInfo,
         action: &SignalAction,
-    ) -> Option<SignalOSAction> {
+        restart_context: Option<UserContext>,
+    ) -> (Option<SignalOSAction>, bool) {
         let signo = sig.signo();
         debug!("Handle signal: {signo:?}");
         match action.disposition {
             SignalDisposition::Default => match signo.default_action() {
-                DefaultSignalAction::Terminate => Some(SignalOSAction::Terminate),
-                DefaultSignalAction::CoreDump => Some(SignalOSAction::CoreDump),
-                DefaultSignalAction::Stop => Some(SignalOSAction::Stop),
-                DefaultSignalAction::Ignore => None,
-                DefaultSignalAction::Continue => Some(SignalOSAction::Continue),
+                DefaultSignalAction::Terminate => (Some(SignalOSAction::Terminate), false),
+                DefaultSignalAction::CoreDump => (Some(SignalOSAction::CoreDump), false),
+                DefaultSignalAction::Stop => (Some(SignalOSAction::Stop), false),
+                DefaultSignalAction::Ignore => (None, false),
+                DefaultSignalAction::Continue => (Some(SignalOSAction::Continue), false),
             },
-            SignalDisposition::Ignore => None,
+            SignalDisposition::Ignore => (None, false),
             SignalDisposition::Handler(handler) => {
                 let layout = Layout::new::<SignalFrame>();
                 let stack = self.stack.lock();
@@ -93,17 +94,20 @@ impl ThreadSignalManager {
                 drop(stack);
 
                 let aligned_sp = (sp - layout.size()) & !(layout.align() - 1);
+                let restart_context =
+                    restart_context.filter(|_| action.flags.contains(SignalActionFlags::RESTART));
+                let restore_uctx = restart_context.unwrap_or(*uctx);
 
                 let frame_ptr = aligned_sp as *mut SignalFrame;
                 if frame_ptr
                     .vm_write(SignalFrame {
-                        ucontext: UContext::new(uctx, restore_blocked),
+                        ucontext: UContext::new(&restore_uctx, restore_blocked),
                         siginfo: sig.clone(),
-                        uctx: *uctx,
+                        uctx: restore_uctx,
                     })
                     .is_err()
                 {
-                    return Some(SignalOSAction::CoreDump);
+                    return (Some(SignalOSAction::CoreDump), false);
                 }
 
                 uctx.set_ip(handler as usize);
@@ -119,7 +123,7 @@ impl ThreadSignalManager {
                 {
                     let new_sp = uctx.sp() - 8;
                     if (new_sp as *mut usize).vm_write(restorer).is_err() {
-                        return Some(SignalOSAction::CoreDump);
+                        return (Some(SignalOSAction::CoreDump), false);
                     }
                     uctx.set_sp(new_sp);
                 }
@@ -135,7 +139,7 @@ impl ThreadSignalManager {
                     self.proc.actions.lock()[signo] = SignalAction::default();
                 }
                 *self.blocked.lock() |= add_blocked;
-                Some(SignalOSAction::Handler)
+                (Some(SignalOSAction::Handler), restart_context.is_some())
             }
         }
     }
@@ -145,7 +149,8 @@ impl ThreadSignalManager {
         &self,
         uctx: &mut UserContext,
         restore_blocked: Option<SignalSet>,
-    ) -> Option<(SignalInfo, SignalOSAction)> {
+        restart_context: Option<UserContext>,
+    ) -> Option<(SignalInfo, SignalOSAction, bool)> {
         let blocked = self.blocked.lock();
         let mask = !*blocked;
         let restore_blocked = restore_blocked.unwrap_or_else(|| *blocked);
@@ -161,8 +166,10 @@ impl ThreadSignalManager {
             }?;
             let action = self.proc.actions.lock()[sig.signo()].clone();
 
-            if let Some(os_action) = self.handle_signal(uctx, restore_blocked, &sig, &action) {
-                break Some((sig, os_action));
+            let (os_action, restarted) =
+                self.handle_signal(uctx, restore_blocked, &sig, &action, restart_context);
+            if let Some(os_action) = os_action {
+                break Some((sig, os_action, restarted));
             }
         }
     }
@@ -175,13 +182,23 @@ impl ThreadSignalManager {
         uctx: &mut UserContext,
         restore_blocked: Option<SignalSet>,
     ) -> Option<(SignalInfo, SignalOSAction)> {
+        self.check_signals_with_restart(uctx, restore_blocked, None)
+            .map(|(sig, action, _)| (sig, action))
+    }
+
+    pub fn check_signals_with_restart(
+        &self,
+        uctx: &mut UserContext,
+        restore_blocked: Option<SignalSet>,
+        restart_context: Option<UserContext>,
+    ) -> Option<(SignalInfo, SignalOSAction, bool)> {
         // Fast path
         if !self.possibly_has_signal.load(Ordering::Acquire)
             && !self.proc.possibly_has_signal.load(Ordering::Acquire)
         {
             return None;
         }
-        self.check_signals_slow(uctx, restore_blocked)
+        self.check_signals_slow(uctx, restore_blocked, restart_context)
     }
 
     /// Restores the signal frame. Called by `sigreturn`.

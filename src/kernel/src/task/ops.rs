@@ -15,8 +15,14 @@ use starry_vm::{VmMutPtr, VmPtr};
 use weak_map::WeakMap;
 
 use super::{
+<<<<<<< HEAD
     futex_table_for, send_signal_thread_inner, send_signal_to_process, send_signal_to_thread,
     AsThread, FutexKey, ProcessData, TimerState,
+=======
+    AsThread, FutexKey, ProcessData, TimerState, futex_table_for,
+    send_signal_thread_inner_with_source, send_signal_to_process_with_source,
+    send_signal_to_thread_with_source,
+>>>>>>> zqh-fix-ltp-new
 };
 
 static TASK_TABLE: RwLock<WeakMap<Pid, WeakAxTaskRef>> = RwLock::new(WeakMap::new());
@@ -119,7 +125,12 @@ pub fn poll_timer(task: &TaskInner) {
         return;
     };
     time.poll(|signo| {
-        send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));
+        send_signal_thread_inner_with_source(
+            task,
+            thr,
+            SignalInfo::new_kernel(signo),
+            "poll_timer:itimer",
+        );
     });
 }
 
@@ -133,7 +144,12 @@ pub fn set_timer_state(task: &TaskInner, state: TimerState) {
         return;
     };
     time.poll(|signo| {
-        send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));
+        send_signal_thread_inner_with_source(
+            task,
+            thr,
+            SignalInfo::new_kernel(signo),
+            "set_timer_state:itimer",
+        );
     });
     time.set_state(state);
 }
@@ -226,7 +242,11 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         process.exit();
         if let Some(parent) = process.parent() {
             if let Some(signo) = thr.proc_data.exit_signal {
-                let _ = send_signal_to_process(parent.pid(), Some(SignalInfo::new_kernel(signo)));
+                let _ = send_signal_to_process_with_source(
+                    parent.pid(),
+                    Some(SignalInfo::new_kernel(signo)),
+                    "do_exit:parent_exit_signal",
+                );
             }
             if let Ok(data) = get_process_data(parent.pid()) {
                 data.child_exit_event.wake();
@@ -244,7 +264,12 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         process.group_exit();
         let sig = SignalInfo::new_kernel(Signo::SIGKILL);
         for tid in process.threads() {
-            let _ = send_signal_to_thread(None, tid, Some(sig.clone()));
+            let _ = send_signal_to_thread_with_source(
+                None,
+                tid,
+                Some(sig.clone()),
+                "do_exit:group_exit_SIGKILL",
+            );
         }
     }
     thr.set_exit();
