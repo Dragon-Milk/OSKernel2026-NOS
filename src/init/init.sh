@@ -292,11 +292,7 @@ run_ltp_dir() {
             echo "RUN LTP CASE $name"
             "$file"
             ret=$?
-            if [ "$ret" -eq 0 ]; then
-                echo "PASS LTP CASE $name"
-            else
-                echo "FAIL LTP CASE $name : $ret"
-            fi
+            echo "FAIL LTP CASE $name : $ret"
         done
 
         cd /
