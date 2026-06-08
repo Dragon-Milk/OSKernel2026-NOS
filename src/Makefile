@@ -13,7 +13,7 @@ export NET := y
 export VSOCK := n
 export MEM := 1G
 export ICOUNT := n
-export TEST_PROFILE := full
+export TEST_PROFILE := ltp-only
 
 # Generated Options
 export A := $(CURDIR)
