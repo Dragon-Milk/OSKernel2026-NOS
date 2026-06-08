@@ -12,12 +12,56 @@ mod time;
 
 use axerrno::{AxError, LinuxError};
 use axhal::uspace::UserContext;
+use axtask::current;
+use starry_signal::SignalSet;
 use syscalls::Sysno;
 
 pub use self::{
     fs::*, io_mpx::*, ipc::*, mm::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*,
     time::*,
 };
+use crate::task::AsThread;
+
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "loongarch64",
+    target_arch = "riscv32",
+    target_arch = "riscv64"
+))]
+const SYSCALL_INSTR_SIZE: usize = 4;
+
+#[cfg(target_arch = "x86_64")]
+const SYSCALL_INSTR_SIZE: usize = 2;
+
+fn restart_syscall(uctx: &mut UserContext) {
+    let ip = uctx.ip();
+    uctx.set_ip(ip - SYSCALL_INSTR_SIZE);
+}
+
+fn is_restartable_syscall(sysno: Sysno) -> bool {
+    matches!(sysno, Sysno::wait4)
+}
+
+fn pending_signal_can_restart_syscall() -> bool {
+    let curr = current();
+    let thread = curr.as_thread();
+    let proc_signal = thread.signal.process();
+    let mut pending = thread.signal.pending() & !thread.signal.blocked();
+    let mask = !SignalSet::default();
+
+    while let Some(signo) = pending.dequeue(&mask) {
+        if proc_signal.signal_ignored(signo) {
+            continue;
+        }
+        return proc_signal.can_restart(signo);
+    }
+
+    false
+}
+
+fn should_restart_interrupted_syscall(sysno: Sysno) -> bool {
+    is_restartable_syscall(sysno) && pending_signal_can_restart_syscall()
+}
 
 pub fn handle_syscall(uctx: &mut UserContext) {
     let Some(sysno) = Sysno::new(uctx.sysno()) else {
@@ -653,5 +697,11 @@ pub fn handle_syscall(uctx: &mut UserContext) {
     };
     debug!("Syscall {sysno} return {result:?}");
 
-    uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).code() as _) as _);
+    match result {
+        Ok(ret) => uctx.set_retval(ret as _),
+        Err(AxError::Interrupted) if should_restart_interrupted_syscall(sysno) => {
+            restart_syscall(uctx);
+        }
+        Err(err) => uctx.set_retval(-LinuxError::from(err).code() as _),
+    }
 }

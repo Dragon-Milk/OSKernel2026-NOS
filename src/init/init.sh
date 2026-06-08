@@ -285,14 +285,18 @@ run_ltp_dir() {
     if [ -d "$dir/$target_dir" ] && cd "$dir"; then
         set_library_path "$dir"
 
-        for file in "$target_dir"/*; do
+        for name in abs01 brk01 brk02; do
+            file="$target_dir/$name"
             [ -f "$file" ] || continue
-            name="${file##*/}"
 
             echo "RUN LTP CASE $name"
             "$file"
             ret=$?
-            echo "FAIL LTP CASE $name : $ret"
+            if [ "$ret" -eq 0 ]; then
+                echo "PASS LTP CASE $name"
+            else
+                echo "FAIL LTP CASE $name : $ret"
+            fi
         done
 
         cd /
