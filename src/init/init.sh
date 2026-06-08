@@ -15,13 +15,15 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # lmbench       : run glibc and musl lmbench only
 # lmbench-only  : run original glibc lmbench script
 # lmbench-fast  : run trimmed glibc lmbench
+# ltp-only      : run glibc and musl ltp only
 # perf          : run stable profile with kernel-side perf summary when built with perf-profile
 # unixbench     : run glibc and musl unixbench only
 # wait-repro    : run wait/libctest/lmbench/unixbench repro
 # full          : scan and run all testcode scripts
 # ============================================================
-SKIP_LTP=${SKIP_LTP:-1}
-TEST_PROFILE=${TEST_PROFILE:-full}
+SKIP_LTP=${SKIP_LTP:-0}
+TEST_PROFILE=${TEST_PROFILE:-ltp-only}
+echo "[init] TEST_PROFILE=$TEST_PROFILE"
 
 run_with_shell() {
     script="$1"
@@ -272,6 +274,40 @@ run_lmbench_fast_tests() {
     cd /
 }
 
+run_ltp_dir() {
+    dir="$1"
+    group="$2"
+    target_dir="ltp/testcases/bin"
+
+    echo "run ${dir}/ltp"
+    echo "#### OS COMP TEST GROUP START $group ####"
+
+    if [ -d "$dir/$target_dir" ] && cd "$dir"; then
+        set_library_path "$dir"
+
+        for file in "$target_dir"/*; do
+            [ -f "$file" ] || continue
+            name="${file##*/}"
+
+            echo "RUN LTP CASE $name"
+            "$file"
+            ret=$?
+            echo "FAIL LTP CASE $name : $ret"
+        done
+
+        cd /
+    fi
+
+    echo "#### OS COMP TEST GROUP END $group ####"
+}
+
+run_ltp_only_tests() {
+    found=1
+    SKIP_LTP=0
+    run_ltp_dir /glibc ltp-glibc
+    run_ltp_dir /musl ltp-musl
+}
+
 run_lmbench_write_tests() {
     found=1
     cd /glibc || return
@@ -358,6 +394,9 @@ case "$TEST_PROFILE" in
         ;;
     lmbench-fast)
         run_lmbench_fast_tests
+        ;;
+    ltp-only)
+        run_ltp_only_tests
         ;;
     perf)
         run_stable_tests
