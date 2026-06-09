@@ -1,119 +1,14 @@
-use alloc::string::String;
-use core::{
-    mem,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use axerrno::{AxError, AxResult};
 use axhal::uspace::UserContext;
-<<<<<<< HEAD
 use axtask::{current, TaskInner};
 use starry_process::{init_proc, Pid, Process};
 use starry_signal::{SignalInfo, SignalOSAction, SignalSet};
 
-use super::{do_exit, get_process_data, get_process_group, get_task, AsThread, Thread};
-=======
-use axtask::{TaskInner, current};
-use linux_raw_sys::general::kernel_sigset_t;
-use starry_process::{Pid, Process, init_proc};
-use starry_signal::{SignalInfo, SignalOSAction, SignalSet};
-
 use super::{
-    AsThread, ProcessData, Thread, do_exit, get_process_data, get_process_group, get_task,
+    AsThread, Thread, do_exit, get_process_data, get_process_group, get_task,
 };
-
-pub fn ltp_trace_signal_set_bits(set: SignalSet) -> u64 {
-    let raw: kernel_sigset_t = set.into();
-    unsafe { mem::transmute::<kernel_sigset_t, u64>(raw) }
-}
-
-pub fn ltp_trace_proc_enabled(proc_data: &ProcessData) -> bool {
-    let exe = proc_data.exe_path.read();
-    if exe.contains("abort01") || exe.contains("tst_test") {
-        return true;
-    }
-    drop(exe);
-
-    let cmdline = proc_data.cmdline.read();
-    cmdline
-        .iter()
-        .any(|arg| arg.contains("abort01") || arg.contains("tst_test"))
-}
-
-pub fn ltp_trace_current_enabled() -> bool {
-    current()
-        .try_as_thread()
-        .is_some_and(|thr| ltp_trace_proc_enabled(&thr.proc_data))
-}
-
-pub fn ltp_trace_proc_label(proc_data: &ProcessData) -> String {
-    let exe = proc_data.exe_path.read();
-    let mut out = String::new();
-    out.push_str("exe=");
-    out.push_str(&exe);
-    drop(exe);
-
-    out.push_str(" cmd=");
-    let cmdline = proc_data.cmdline.read();
-    if cmdline.is_empty() {
-        out.push_str("<empty>");
-    } else {
-        for (idx, arg) in cmdline.iter().enumerate() {
-            if idx > 0 {
-                out.push(' ');
-            }
-            out.push_str(arg);
-        }
-    }
-    out
-}
-
-fn ltp_trace_current_label() -> String {
-    current()
-        .try_as_thread()
-        .map(|thr| ltp_trace_proc_label(&thr.proc_data))
-        .unwrap_or_else(|| "kernel-task".into())
-}
-
-fn ltp_trace_signal_delivery(
-    source: &str,
-    target_kind: &str,
-    target_pid: Pid,
-    target_tid: Option<Pid>,
-    target_proc_data: Option<&ProcessData>,
-    sig: &SignalInfo,
-) {
-    let target_matches = target_proc_data.is_some_and(ltp_trace_proc_enabled);
-    if !target_matches && !ltp_trace_current_enabled() {
-        return;
-    }
-
-    let curr = current();
-    let curr_tid = curr.id().as_u64() as Pid;
-    let curr_pid = curr
-        .try_as_thread()
-        .map(|thr| thr.proc_data.proc.pid())
-        .unwrap_or(0);
-    let target_label = target_proc_data
-        .map(ltp_trace_proc_label)
-        .unwrap_or_else(|| "<unknown>".into());
-    debug!(
-        "[ltp-sigtrace] source={} target={} target_pid={} target_tid={:?} signal={}({:?}) code={} \
-         curr_pid={} curr_tid={} curr={} target={}",
-        source,
-        target_kind,
-        target_pid,
-        target_tid,
-        sig.signo() as u8,
-        sig.signo(),
-        sig.code(),
-        curr_pid,
-        curr_tid,
-        ltp_trace_current_label(),
-        target_label,
-    );
-}
->>>>>>> zqh-fix-ltp-new
 
 pub fn check_signals(
     thr: &Thread,
@@ -122,43 +17,17 @@ pub fn check_signals(
 ) -> bool {
     let restart_syscall = thr.restart_syscall();
     let restart_context = restart_syscall.map(|restart| restart.pre_syscall_context);
-    let Some((sig, os_action, restarted_syscall)) =
+    let Some((sig, os_action, _restarted_syscall)) =
         thr.signal
             .check_signals_with_restart(uctx, restore_blocked, restart_context)
     else {
         return false;
     };
-    if let Some(restart) = restart_syscall {
+    if restart_syscall.is_some() {
         thr.clear_restart_syscall();
-        if ltp_trace_proc_enabled(&thr.proc_data) {
-            debug!(
-                "[ltp-restart] signal={}({:?}) os_action={:?} sysno={} restarted={} proc={}",
-                sig.signo() as u8,
-                sig.signo(),
-                os_action,
-                restart.sysno,
-                restarted_syscall,
-                ltp_trace_proc_label(&thr.proc_data),
-            );
-        }
     }
 
     let signo = sig.signo();
-    let action_source = match os_action {
-        SignalOSAction::Terminate => "check_signals:Terminate",
-        SignalOSAction::CoreDump => "check_signals:CoreDump",
-        SignalOSAction::Stop => "check_signals:Stop",
-        SignalOSAction::Continue => "check_signals:Continue",
-        SignalOSAction::Handler => "check_signals:Handler",
-    };
-    ltp_trace_signal_delivery(
-        action_source,
-        "signal-action",
-        thr.proc_data.proc.pid(),
-        Some(current().id().as_u64() as Pid),
-        Some(&thr.proc_data),
-        &sig,
-    );
     match os_action {
         SignalOSAction::Terminate => {
             do_exit(signo as i32, true);
@@ -210,16 +79,8 @@ pub(super) fn send_signal_thread_inner_with_source(
     task: &TaskInner,
     thr: &Thread,
     sig: SignalInfo,
-    source: &'static str,
+    _source: &'static str,
 ) {
-    ltp_trace_signal_delivery(
-        source,
-        "thread-inner",
-        thr.proc_data.proc.pid(),
-        Some(task.id().as_u64() as Pid),
-        Some(&thr.proc_data),
-        &sig,
-    );
     if thr.signal.send_signal(sig) {
         task.interrupt();
     }
@@ -273,7 +134,7 @@ pub fn send_signal_to_process(pid: Pid, sig: Option<SignalInfo>) -> AxResult<()>
 pub fn send_signal_to_process_with_source(
     pid: Pid,
     sig: Option<SignalInfo>,
-    source: &'static str,
+    _source: &'static str,
 ) -> AxResult<()> {
     let proc_data = match get_process_data(pid) {
         Ok(proc_data) => proc_data,
@@ -284,16 +145,7 @@ pub fn send_signal_to_process_with_source(
     if let Some(sig) = sig {
         let signo = sig.signo();
         info!("Send signal {signo:?} to process {pid}");
-        let trace_sig = sig.clone();
         let target_tid = proc_data.signal.send_signal(sig);
-        ltp_trace_signal_delivery(
-            source,
-            "process",
-            pid,
-            target_tid.map(|tid| tid as Pid),
-            Some(&proc_data),
-            &trace_sig,
-        );
         if let Some(tid) = target_tid
             && let Ok(task) = get_task(tid)
         {
@@ -338,22 +190,33 @@ pub fn raise_signal_fatal_with_source(sig: SignalInfo, source: &'static str) -> 
 
     let signo = sig.signo();
     info!("Send fatal signal {signo:?} to the current process");
-    let trace_sig = sig.clone();
     let target_tid = proc_data.signal.send_signal(sig);
-    ltp_trace_signal_delivery(
-        source,
-        "fatal-current-process",
-        proc_data.proc.pid(),
-        target_tid.map(|tid| tid as Pid),
-        Some(proc_data),
-        &trace_sig,
-    );
     if let Some(tid) = target_tid
         && let Ok(task) = get_task(tid)
     {
         task.interrupt();
     } else {
         // No task wants to handle the signal, abort the task
+        do_exit(signo as i32, true);
+    }
+
+    Ok(())
+}
+
+pub fn raise_signal_current_thread_with_source(
+    sig: SignalInfo,
+    _source: &'static str,
+) -> AxResult<()> {
+    let curr = current();
+    let thr = curr.as_thread();
+    let proc_data = &thr.proc_data;
+
+    let signo = sig.signo();
+    info!("Send fatal signal {signo:?} to the current thread");
+    let should_interrupt = thr.signal.send_signal(sig);
+    if should_interrupt {
+        curr.interrupt();
+    } else {
         do_exit(signo as i32, true);
     }
 

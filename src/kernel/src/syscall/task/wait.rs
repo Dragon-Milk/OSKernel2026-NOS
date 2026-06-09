@@ -11,9 +11,7 @@ use starry_process::{Pid, Process};
 use starry_signal::Signo;
 use starry_vm::{VmMutPtr, VmPtr};
 
-use crate::task::{
-    AsThread, ltp_trace_current_enabled, ltp_trace_proc_label, ltp_trace_signal_set_bits,
-};
+use crate::task::AsThread;
 
 bitflags! {
     #[derive(Debug)]
@@ -62,7 +60,6 @@ impl WaitPid {
 
 pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isize> {
     let options = WaitOptions::from_bits_truncate(options);
-    let raw_pid = pid;
     info!("sys_waitpid <= pid: {pid:?}, options: {options:?}");
 
     let curr = current();
@@ -125,34 +122,10 @@ pub fn sys_waitpid(pid: i32, exit_code: *mut i32, options: u32) -> AxResult<isiz
                 match check_children().transpose() {
                     Some(res) => Poll::Ready(res),
                     None => {
-                        let (pending, blocked, deliverable, no_sigchld) = wait_eintr_signals();
+                        let (_, _, _, no_sigchld) = wait_eintr_signals();
                         if no_sigchld.is_empty() {
                             Poll::Pending
                         } else {
-                            if ltp_trace_current_enabled() {
-                                let thread = curr.as_thread();
-                                debug!(
-                                    "[ltp-wait-eintr] curr_pid={} curr_tid={} wait_raw_pid={} \
-                                     wait={:?} options={:?} pending_bits={:#018x} pending={:?} \
-                                     blocked_bits={:#018x} blocked={:?} deliverable_bits={:#018x} \
-                                     deliverable={:?} no_sigchld_bits={:#018x} no_sigchld={:?} \
-                                     proc={}",
-                                    proc.pid(),
-                                    curr.id().as_u64(),
-                                    raw_pid,
-                                    pid,
-                                    options,
-                                    ltp_trace_signal_set_bits(pending),
-                                    pending,
-                                    ltp_trace_signal_set_bits(blocked),
-                                    blocked,
-                                    ltp_trace_signal_set_bits(deliverable),
-                                    deliverable,
-                                    ltp_trace_signal_set_bits(no_sigchld),
-                                    no_sigchld,
-                                    ltp_trace_proc_label(&thread.proc_data),
-                                );
-                            }
                             Poll::Ready(Err(AxError::Interrupted))
                         }
                     }

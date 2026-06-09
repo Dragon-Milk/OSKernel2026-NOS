@@ -5,12 +5,8 @@ use starry_signal::{SignalInfo, Signo};
 use starry_vm::{VmMutPtr, VmPtr};
 
 use super::{
-<<<<<<< HEAD
-    check_signals, raise_signal_fatal, set_timer_state, unblock_next_signal, AsThread, TimerState,
-=======
-    AsThread, TimerState, check_signals, raise_signal_fatal_with_source, set_timer_state,
-    unblock_next_signal,
->>>>>>> zqh-fix-ltp-new
+    AsThread, TimerState, check_signals, raise_signal_current_thread_with_source,
+    raise_signal_fatal_with_source, set_timer_state, unblock_next_signal,
 };
 use crate::syscall::handle_syscall;
 
@@ -40,7 +36,7 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
                                 "{:?}: segmentation fault at {:#x} {:?}",
                                 thr.proc_data.proc, addr, flags
                             );
-                            raise_signal_fatal_with_source(
+                            raise_signal_current_thread_with_source(
                                 SignalInfo::new_kernel(Signo::SIGSEGV),
                                 "user_loop:page_fault_SIGSEGV",
                             )

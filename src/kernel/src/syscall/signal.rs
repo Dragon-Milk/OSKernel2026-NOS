@@ -16,8 +16,7 @@ use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{
     task::{
-        AsThread, block_next_signal, check_signals, ltp_trace_current_enabled,
-        ltp_trace_proc_label, ltp_trace_signal_set_bits, processes,
+        AsThread, block_next_signal, check_signals, processes,
         send_signal_to_process_group_with_source, send_signal_to_process_with_source,
         send_signal_to_thread_with_source,
     },
@@ -88,24 +87,6 @@ pub fn sys_rt_sigaction(
     }
     if let Some(act) = act.nullable() {
         let act: SignalAction = unsafe { act.vm_read_uninit()?.assume_init() }.into();
-        if ltp_trace_current_enabled() {
-            let curr = current();
-            let proc_data = &curr.as_thread().proc_data;
-            debug!(
-                "[ltp-sigaction] curr_pid={} curr_tid={} signo={}({:?}) flags={:?} \
-                 flags_bits={:#x} mask_bits={:#018x} mask={:?} disposition={:?} proc={}",
-                proc_data.proc.pid(),
-                curr.id().as_u64(),
-                signo as u8,
-                signo,
-                act.flags,
-                act.flags.bits(),
-                ltp_trace_signal_set_bits(act.mask),
-                act.mask,
-                act.disposition,
-                ltp_trace_proc_label(proc_data),
-            );
-        }
         debug!("sys_rt_sigaction <= signo: {signo:?}, act: {act:?}");
         actions[signo] = act;
     }

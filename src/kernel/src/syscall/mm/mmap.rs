@@ -41,7 +41,7 @@ impl From<MmapProt> for MappingFlags {
             flags |= MappingFlags::READ;
         }
         if value.contains(MmapProt::WRITE) {
-            flags |= MappingFlags::WRITE;
+            flags |= MappingFlags::READ | MappingFlags::WRITE;
         }
         if value.contains(MmapProt::EXEC) {
             flags |= MappingFlags::EXECUTE;
@@ -336,6 +336,47 @@ pub fn sys_mlock(addr: usize, length: usize) -> AxResult<isize> {
     sys_mlock2(addr, length, 0)
 }
 
-pub fn sys_mlock2(_addr: usize, _length: usize, _flags: u32) -> AxResult<isize> {
+pub fn sys_mlock2(addr: usize, length: usize, flags: u32) -> AxResult<isize> {
+    if flags & !MLOCK_ONFAULT != 0 {
+        return Err(AxError::InvalidInput);
+    }
+    if length == 0 || flags & MLOCK_ONFAULT != 0 {
+        return Ok(0);
+    }
+
+    let page_size = PageSize::Size4K as usize;
+    let start = addr.align_down(page_size);
+    let end = addr
+        .checked_add(length)
+        .ok_or(AxError::NoMemory)?
+        .align_up(page_size);
+
+    let curr = current();
+    let mut aspace = curr.as_thread().proc_data.aspace.lock();
+
+    let mut page = start;
+    while page < end {
+        let vaddr = VirtAddr::from(page);
+        let flags = aspace.find_area(vaddr).ok_or(AxError::NoMemory)?.flags();
+        let access_flags = if flags.contains(MappingFlags::READ) {
+            MappingFlags::READ
+        } else if flags.contains(MappingFlags::WRITE) {
+            MappingFlags::WRITE
+        } else if flags.contains(MappingFlags::EXECUTE) {
+            MappingFlags::EXECUTE
+        } else {
+            MappingFlags::empty()
+        };
+
+        if !aspace.handle_page_fault(vaddr, access_flags) {
+            return Err(AxError::NoMemory);
+        }
+        page += page_size;
+    }
+
+    Ok(0)
+}
+
+pub fn sys_munlock(_addr: usize, _length: usize) -> AxResult<isize> {
     Ok(0)
 }

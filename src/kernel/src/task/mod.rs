@@ -205,7 +205,6 @@ impl Thread {
             .store(accessing, Ordering::Release);
     }
 
-<<<<<<< HEAD
     pub fn sched_policy(&self) -> u32 {
         self.sched_policy.load(Ordering::SeqCst)
     }
@@ -217,7 +216,8 @@ impl Thread {
     pub fn set_sched_param(&self, policy: u32, priority: i32) {
         self.sched_policy.store(policy, Ordering::SeqCst);
         self.sched_priority.store(priority, Ordering::SeqCst);
-=======
+    }
+
     pub fn set_restart_syscall(&self, restart: RestartSyscall) {
         *self.restart_syscall.borrow_mut() = Some(restart);
     }
@@ -228,7 +228,6 @@ impl Thread {
 
     pub fn clear_restart_syscall(&self) {
         *self.restart_syscall.borrow_mut() = None;
->>>>>>> zqh-fix-ltp-new
     }
 }
 

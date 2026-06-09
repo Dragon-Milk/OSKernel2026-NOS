@@ -15,14 +15,9 @@ use starry_vm::{VmMutPtr, VmPtr};
 use weak_map::WeakMap;
 
 use super::{
-<<<<<<< HEAD
-    futex_table_for, send_signal_thread_inner, send_signal_to_process, send_signal_to_thread,
-    AsThread, FutexKey, ProcessData, TimerState,
-=======
     AsThread, FutexKey, ProcessData, TimerState, futex_table_for,
     send_signal_thread_inner_with_source, send_signal_to_process_with_source,
     send_signal_to_thread_with_source,
->>>>>>> zqh-fix-ltp-new
 };
 
 static TASK_TABLE: RwLock<WeakMap<Pid, WeakAxTaskRef>> = RwLock::new(WeakMap::new());

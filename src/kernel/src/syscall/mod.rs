@@ -19,7 +19,7 @@ pub use self::{
     fs::*, io_mpx::*, ipc::*, mm::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*,
     time::*,
 };
-use crate::task::{AsThread, RestartSyscall, ltp_trace_current_enabled};
+use crate::task::{AsThread, RestartSyscall};
 
 #[cfg(target_arch = "x86_64")]
 const SYSCALL_INSN_LEN: usize = 2;
@@ -387,6 +387,7 @@ pub fn handle_syscall(uctx: &mut UserContext) {
         Sysno::msync => sys_msync(uctx.arg0(), uctx.arg1() as _, uctx.arg2() as _),
         Sysno::mlock => sys_mlock(uctx.arg0(), uctx.arg1() as _),
         Sysno::mlock2 => sys_mlock2(uctx.arg0(), uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::munlock => sys_munlock(uctx.arg0(), uctx.arg1() as _),
 
         // task info
         Sysno::getpid => sys_getpid(),
@@ -685,15 +686,6 @@ pub fn handle_syscall(uctx: &mut UserContext) {
         && let Some(thr) = curr.try_as_thread()
     {
         thr.set_restart_syscall(restart);
-        if ltp_trace_current_enabled() {
-            debug!(
-                "[ltp-restart-candidate] sysno={:?} raw_sysno={} pre_ip={:#x} post_ip={:#x}",
-                sysno,
-                restart.sysno,
-                restart.pre_syscall_context.ip(),
-                uctx.ip(),
-            );
-        }
     }
 
     uctx.set_retval(result.unwrap_or_else(|err| -LinuxError::from(err).code() as _) as _);
