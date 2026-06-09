@@ -16,6 +16,8 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # lmbench-only  : run original glibc lmbench script
 # lmbench-fast  : run trimmed glibc lmbench
 # ltp-only      : run glibc and musl ltp only
+# ltp-list      : list glibc and musl ltp testcase names only
+# ltp-batch     : run one embedded phase1 LTP category batch
 # perf          : run stable profile with kernel-side perf summary when built with perf-profile
 # unixbench     : run glibc and musl unixbench only
 # wait-repro    : run wait/libctest/lmbench/unixbench repro
@@ -23,6 +25,9 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # ============================================================
 SKIP_LTP=${SKIP_LTP:-0}
 TEST_PROFILE=${TEST_PROFILE:-ltp-only}
+LTP_CATEGORY=${LTP_CATEGORY:-process}
+LTP_BATCH=${LTP_BATCH:-01}
+LTP_LIBC=${LTP_LIBC:-glibc}
 echo "[init] TEST_PROFILE=$TEST_PROFILE"
 
 run_with_shell() {
@@ -308,6 +313,116 @@ run_ltp_only_tests() {
     run_ltp_dir /musl ltp-musl
 }
 
+run_ltp_list_libc() {
+    libc="$1"
+    target_dir="$2"
+    count=0
+
+    echo "[LTP-LIST-START] $libc"
+
+    if [ ! -d "$target_dir" ]; then
+        echo "[LTP-LIST-ERROR] $libc directory not found: $target_dir"
+        echo "[LTP-LIST-END] $libc COUNT=$count"
+        return
+    fi
+
+    for file in "$target_dir"/*; do
+        [ -f "$file" ] || continue
+        name="${file##*/}"
+        count=$((count + 1))
+        printf 'LTP_CASE %s %06d %s\n' "$libc" "$count" "$name"
+    done
+
+    echo "[LTP-LIST-END] $libc COUNT=$count"
+}
+
+run_ltp_list_tests() {
+    found=1
+    run_ltp_list_libc glibc /glibc/ltp/testcases/bin
+    run_ltp_list_libc musl /musl/ltp/testcases/bin
+}
+
+run_ltp_batch_libc() {
+    libc="$1"
+
+    case "$libc" in
+        glibc) dir=/glibc ;;
+        musl) dir=/musl ;;
+        *)
+            echo "[LTP-BATCH-ERROR] unsupported libc: $libc"
+            return
+            ;;
+    esac
+
+    target_dir="$dir/ltp/testcases/bin"
+    group="ltp-$libc"
+
+    echo "[LTP-BATCH] category=$LTP_CATEGORY batch=$LTP_BATCH libc=$libc"
+    echo "#### OS COMP TEST GROUP START $group ####"
+
+    if [ ! -d "$target_dir" ]; then
+        echo "[LTP-BATCH-ERROR] $libc directory not found: $target_dir"
+        echo "#### OS COMP TEST GROUP END $group ####"
+        return
+    fi
+
+    if ! cd "$dir"; then
+        echo "[LTP-BATCH-ERROR] cannot cd to $dir"
+        echo "#### OS COMP TEST GROUP END $group ####"
+        return
+    fi
+
+    set_library_path "$dir"
+
+    ltp_batch_cases "$LTP_CATEGORY" "$LTP_BATCH" | while read name; do
+        [ -n "$name" ] || continue
+        file="ltp/testcases/bin/$name"
+
+        if [ ! -f "$file" ]; then
+            echo "[LTP-BATCH-MISSING] $libc $name: $dir/$file"
+            continue
+        fi
+
+        echo "RUN LTP CASE $name"
+        "$file"
+        ret=$?
+        echo "FAIL LTP CASE $name : $ret"
+    done
+
+    cd /
+    echo "#### OS COMP TEST GROUP END $group ####"
+}
+
+run_ltp_batch_tests() {
+    found=1
+
+    case "$LTP_CATEGORY" in
+        process|fs|mm-ipc|common-easy) ;;
+        *)
+            echo "[LTP-BATCH-ERROR] unsupported category: $LTP_CATEGORY"
+            return
+            ;;
+    esac
+
+    if ! ltp_batch_cases "$LTP_CATEGORY" "$LTP_BATCH" >/dev/null 2>&1; then
+        echo "[LTP-BATCH-ERROR] batch not found: category=$LTP_CATEGORY batch=$LTP_BATCH"
+        return
+    fi
+
+    case "$LTP_LIBC" in
+        glibc|musl)
+            run_ltp_batch_libc "$LTP_LIBC"
+            ;;
+        both)
+            run_ltp_batch_libc glibc
+            run_ltp_batch_libc musl
+            ;;
+        *)
+            echo "[LTP-BATCH-ERROR] unsupported libc: $LTP_LIBC"
+            ;;
+    esac
+}
+
 run_lmbench_write_tests() {
     found=1
     cd /glibc || return
@@ -397,6 +512,12 @@ case "$TEST_PROFILE" in
         ;;
     ltp-only)
         run_ltp_only_tests
+        ;;
+    ltp-list)
+        run_ltp_list_tests
+        ;;
+    ltp-batch)
+        run_ltp_batch_tests
         ;;
     perf)
         run_stable_tests

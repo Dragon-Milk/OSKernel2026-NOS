@@ -14,6 +14,9 @@ export VSOCK := n
 export MEM := 1G
 export ICOUNT := n
 export TEST_PROFILE := ltp-only
+export LTP_CATEGORY := process
+export LTP_BATCH := 01
+export LTP_LIBC := glibc
 
 # Generated Options
 export A := $(CURDIR)

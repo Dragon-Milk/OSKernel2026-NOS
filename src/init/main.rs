@@ -4,16 +4,23 @@
 
 extern crate alloc;
 
+const INIT_SCRIPT: &str = concat!(include_str!("ltp-cases.sh"), "\n", include_str!("init.sh"));
+
 pub const CMDLINES: &[&[&str]] = &[
-    &["/bin/sh", "-c", include_str!("init.sh")],
-    &["/busybox", "sh", "-c", include_str!("init.sh")],
-    &["/musl/busybox", "sh", "-c", include_str!("init.sh")],
-    &["/glibc/busybox", "sh", "-c", include_str!("init.sh")],
+    &["/bin/sh", "-c", INIT_SCRIPT],
+    &["/busybox", "sh", "-c", INIT_SCRIPT],
+    &["/musl/busybox", "sh", "-c", INIT_SCRIPT],
+    &["/glibc/busybox", "sh", "-c", INIT_SCRIPT],
 ];
 
 #[unsafe(no_mangle)]
 fn main() {
-    let envs = [concat!("TEST_PROFILE=", env!("TEST_PROFILE"))];
+    let envs = [
+        concat!("TEST_PROFILE=", env!("TEST_PROFILE")),
+        concat!("LTP_CATEGORY=", env!("LTP_CATEGORY")),
+        concat!("LTP_BATCH=", env!("LTP_BATCH")),
+        concat!("LTP_LIBC=", env!("LTP_LIBC")),
+    ];
 
     starry_kernel::entry::init(CMDLINES, &envs);
 }
