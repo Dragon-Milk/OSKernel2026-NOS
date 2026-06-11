@@ -17,18 +17,19 @@ export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 # lmbench-fast  : run trimmed glibc lmbench
 # ltp-only      : run glibc and musl ltp only
 # ltp-list      : list glibc and musl ltp testcase names only
-# ltp-batch     : run one embedded phase1 LTP category batch
+# ltp-batch     : run embedded phase1 LTP category batches
 # perf          : run stable profile with kernel-side perf summary when built with perf-profile
 # unixbench     : run glibc and musl unixbench only
 # wait-repro    : run wait/libctest/lmbench/unixbench repro
 # full          : scan and run all testcode scripts
 # ============================================================
 SKIP_LTP=${SKIP_LTP:-0}
-TEST_PROFILE=${TEST_PROFILE:-ltp-only}
+TEST_PROFILE=${TEST_PROFILE:-ltp-batch}
 LTP_CATEGORY=${LTP_CATEGORY:-process}
-LTP_BATCH=${LTP_BATCH:-01}
-LTP_LIBC=${LTP_LIBC:-glibc}
+LTP_BATCH=${LTP_BATCH:-all}
+LTP_LIBC=${LTP_LIBC:-both}
 echo "[init] TEST_PROFILE=$TEST_PROFILE"
+echo "[init] LTP_CATEGORY=$LTP_CATEGORY LTP_BATCH=$LTP_BATCH LTP_LIBC=$LTP_LIBC"
 
 run_with_shell() {
     script="$1"
@@ -342,6 +343,28 @@ run_ltp_list_tests() {
     run_ltp_list_libc musl /musl/ltp/testcases/bin
 }
 
+run_ltp_one_batch_libc() {
+    libc="$1"
+    batch="$2"
+
+    echo "[LTP-BATCH] category=$LTP_CATEGORY batch=$batch libc=$libc"
+
+    ltp_batch_cases "$LTP_CATEGORY" "$batch" | while read name; do
+        [ -n "$name" ] || continue
+        file="ltp/testcases/bin/$name"
+
+        if [ ! -f "$file" ]; then
+            echo "[LTP-BATCH-MISSING] $libc $name: $dir/$file"
+            continue
+        fi
+
+        echo "RUN LTP CASE $name"
+        "$file"
+        ret=$?
+        echo "FAIL LTP CASE $name : $ret"
+    done
+}
+
 run_ltp_batch_libc() {
     libc="$1"
 
@@ -357,7 +380,6 @@ run_ltp_batch_libc() {
     target_dir="$dir/ltp/testcases/bin"
     group="ltp-$libc"
 
-    echo "[LTP-BATCH] category=$LTP_CATEGORY batch=$LTP_BATCH libc=$libc"
     echo "#### OS COMP TEST GROUP START $group ####"
 
     if [ ! -d "$target_dir" ]; then
@@ -374,19 +396,21 @@ run_ltp_batch_libc() {
 
     set_library_path "$dir"
 
-    ltp_batch_cases "$LTP_CATEGORY" "$LTP_BATCH" | while read name; do
-        [ -n "$name" ] || continue
-        file="ltp/testcases/bin/$name"
+    if [ "$LTP_BATCH" = "all" ]; then
+        batches="$(ltp_batch_ids "$LTP_CATEGORY")" || {
+            echo "[LTP-BATCH-ERROR] unknown category: $LTP_CATEGORY"
+            cd /
+            echo "#### OS COMP TEST GROUP END $group ####"
+            return
+        }
+    else
+        batches="$LTP_BATCH"
+    fi
 
-        if [ ! -f "$file" ]; then
-            echo "[LTP-BATCH-MISSING] $libc $name: $dir/$file"
-            continue
-        fi
+    echo "[LTP-BATCH-PLAN] category=$LTP_CATEGORY batches=$batches libc=$libc"
 
-        echo "RUN LTP CASE $name"
-        "$file"
-        ret=$?
-        echo "FAIL LTP CASE $name : $ret"
+    for batch in $batches; do
+        run_ltp_one_batch_libc "$libc" "$batch"
     done
 
     cd /
@@ -404,9 +428,16 @@ run_ltp_batch_tests() {
             ;;
     esac
 
-    if ! ltp_batch_cases "$LTP_CATEGORY" "$LTP_BATCH" >/dev/null 2>&1; then
-        echo "[LTP-BATCH-ERROR] batch not found: category=$LTP_CATEGORY batch=$LTP_BATCH"
-        return
+    if [ "$LTP_BATCH" = "all" ]; then
+        if ! ltp_batch_ids "$LTP_CATEGORY" >/dev/null 2>&1; then
+            echo "[LTP-BATCH-ERROR] unknown category: $LTP_CATEGORY"
+            return
+        fi
+    else
+        if ! ltp_batch_cases "$LTP_CATEGORY" "$LTP_BATCH" >/dev/null 2>&1; then
+            echo "[LTP-BATCH-ERROR] batch not found: category=$LTP_CATEGORY batch=$LTP_BATCH"
+            return
+        fi
     fi
 
     case "$LTP_LIBC" in

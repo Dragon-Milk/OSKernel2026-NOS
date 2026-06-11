@@ -1,6 +1,26 @@
 # Auto-generated from src/init/ltp-cases/*.txt.
 # This file is embedded into the init binary by src/init/main.rs.
 
+ltp_batch_ids() {
+    case "$1" in
+        process)
+            echo "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15"
+            ;;
+        fs)
+            echo "01 02 03 04 05 06 07 08 09 10 11 12 13"
+            ;;
+        mm-ipc)
+            echo "01 02 03 04 05 06 07 08 09"
+            ;;
+        common-easy)
+            echo "01"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 ltp_batch_cases() {
     category="$1"
     batch="$2"
