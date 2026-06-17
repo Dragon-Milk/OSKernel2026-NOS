@@ -1,4 +1,5 @@
 use axerrno::{AxError, AxResult, LinuxError};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(feature = "vsock")]
 use axnet::vsock::{VsockSocket, VsockStreamTransport};
 use axnet::{
@@ -65,9 +66,23 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
     socket.add_to_fd_table(cloexec).map(|fd| fd as isize)
 }
 
+fn is_bindable_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip == Ipv4Addr::UNSPECIFIED || ip.is_loopback(),
+        IpAddr::V6(ip) => ip == Ipv6Addr::UNSPECIFIED || ip.is_loopback(),
+    }
+}
+
 pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
     debug!("sys_bind <= fd: {fd}, addr: {addr:?}");
+
+    match &addr {
+        SocketAddrEx::Ip(ip_addr) if !is_bindable_ip(ip_addr.ip()) => {
+            return Err(AxError::from(LinuxError::EADDRNOTAVAIL));
+        }
+        _ => {}
+    }
 
     Socket::from_fd(fd)?.bind(addr)?;
 

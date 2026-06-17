@@ -9,6 +9,7 @@
 use alloc::{
     borrow::Cow,
     collections::vec_deque::VecDeque,
+    vec::Vec,
     sync::{Arc, Weak},
     task::Wake,
 };
@@ -25,7 +26,7 @@ use hashbrown::HashMap;
 use kspin::SpinNoPreempt;
 use linux_raw_sys::general::{EPOLLET, EPOLLONESHOT, epoll_event};
 
-use crate::file::{FileLike, get_file_like};
+use crate::file::{Directory, FileLike, get_file_like};
 
 pub struct EpollEvent {
     pub events: IoEvents,
@@ -268,6 +269,11 @@ impl Epoll {
 
     // only register waker, not add to ready queue
     fn register_waker_only(&self, interest: &Arc<EpollInterest>) {
+        if !self.has_interest(interest) {
+            interest.mark_not_in_queue();
+            return;
+        }
+
         let Some(file) = interest.key.get_file() else {
             return;
         };
@@ -287,6 +293,11 @@ impl Epoll {
 
     // for add/modify
     fn check_and_register_waker(&self, interest: &Arc<EpollInterest>) {
+        if !self.has_interest(interest) {
+            interest.mark_not_in_queue();
+            return;
+        }
+
         let Some(file) = interest.key.get_file() else {
             return;
         };
@@ -315,8 +326,72 @@ impl Epoll {
         }
     }
 
-    pub fn add(&self, fd: i32, event: EpollEvent, flags: EpollFlags) -> AxResult<()> {
+    fn has_interest(&self, interest: &EpollInterest) -> bool {
+        self.inner
+            .interests
+            .lock()
+            .get(&interest.key)
+            .is_some_and(|current| core::ptr::eq(current.as_ref(), interest))
+    }
+
+    fn validate_target(&self, fd: i32) -> AxResult<EntryKey> {
         let key = EntryKey::new(fd)?;
+        let Some(file) = key.get_file() else {
+            return Err(AxError::BadFileDescriptor);
+        };
+
+        if file.is::<Directory>() {
+            return Err(AxError::OperationNotPermitted);
+        }
+
+        if let Some(target) = file.downcast_ref::<Epoll>() {
+            if Arc::ptr_eq(&self.inner, &target.inner) {
+                return Err(AxError::InvalidInput);
+            }
+            let depth = target.nesting_depth();
+            if target.contains_epoll(&self.inner) {
+                return Err(AxError::FilesystemLoop);
+            }
+            if depth >= 4 {
+                return Err(AxError::InvalidInput);
+            }
+        }
+
+        Ok(key)
+    }
+
+    fn nesting_depth(&self) -> usize {
+        let interests = self.inner.interests.lock();
+        let mut max_depth = 0;
+        for interest in interests.values() {
+            let Some(file) = interest.key.get_file() else {
+                continue;
+            };
+            if let Some(epoll) = file.downcast_ref::<Epoll>() {
+                max_depth = max_depth.max(1 + epoll.nesting_depth());
+            }
+        }
+        max_depth
+    }
+
+    fn contains_epoll(&self, needle: &Arc<EpollInner>) -> bool {
+        let interests = self.inner.interests.lock();
+        for interest in interests.values() {
+            let Some(file) = interest.key.get_file() else {
+                continue;
+            };
+            let Some(epoll) = file.downcast_ref::<Epoll>() else {
+                continue;
+            };
+            if Arc::ptr_eq(&epoll.inner, needle) || epoll.contains_epoll(needle) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn add(&self, fd: i32, event: EpollEvent, flags: EpollFlags) -> AxResult<()> {
+        let key = self.validate_target(fd)?;
         let interest = Arc::new(EpollInterest::new(key.clone(), event, flags));
         let mut guard = self.inner.interests.lock();
         if guard.contains_key(&key) {
@@ -336,10 +411,7 @@ impl Epoll {
         let mut guard = self.inner.interests.lock();
         let old = guard.get_mut(&key).ok_or(AxError::NotFound)?;
 
-        // update new interest if old already in ready queue
-        if old.is_in_queue() {
-            interest.in_ready_queue.store(true, Ordering::Release);
-        }
+        old.mark_not_in_queue();
         *old = Arc::clone(&interest);
         drop(guard);
         trace!(
@@ -353,11 +425,11 @@ impl Epoll {
 
     pub fn delete(&self, fd: i32) -> AxResult<()> {
         let key = EntryKey::new(fd)?;
-        self.inner
-            .interests
-            .lock()
-            .remove(&key)
-            .ok_or(AxError::NotFound)?;
+        if let Some(interest) = self.inner.interests.lock().remove(&key) {
+            interest.mark_not_in_queue();
+        } else {
+            return Err(AxError::NotFound);
+        }
         trace!("Epoll: delete fd={fd}");
         Ok(())
     }
@@ -365,6 +437,7 @@ impl Epoll {
     pub fn poll_events(&self, out: &mut [epoll_event]) -> AxResult<usize> {
         trace!("Epoll: poll_events called, out.len()={}", out.len());
         let mut count = 0;
+        let mut requeue = Vec::new();
         loop {
             let weak_interest = {
                 let mut queue = self.inner.ready_queue.lock();
@@ -383,6 +456,11 @@ impl Epoll {
             let Some(interest) = weak_interest.upgrade() else {
                 continue; // interest already removed
             };
+
+            if !self.has_interest(&interest) {
+                interest.mark_not_in_queue();
+                continue;
+            }
 
             let Some(file) = interest.key.get_file() else {
                 // file already closed remove interests
@@ -403,10 +481,7 @@ impl Epoll {
                         data: event.user_data,
                     };
                     count += 1;
-                    self.inner
-                        .ready_queue
-                        .lock()
-                        .push_back(Arc::downgrade(&interest));
+                    requeue.push(Arc::downgrade(&interest));
                 }
                 ConsumeResult::EventAndRemove(event) => {
                     out[count] = epoll_event {
@@ -422,6 +497,10 @@ impl Epoll {
                     self.register_waker_only(&interest);
                 }
             }
+        }
+
+        if !requeue.is_empty() {
+            self.inner.ready_queue.lock().extend(requeue);
         }
 
         if count == 0 {

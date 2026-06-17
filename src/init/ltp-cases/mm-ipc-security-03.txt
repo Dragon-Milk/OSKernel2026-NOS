@@ -1,0 +1,30 @@
+cpuctl_def_task02
+cpuctl_def_task03
+cpuctl_def_task04
+cpuctl_fj_cpu-hog
+cpuctl_fj_simple_echo
+cpuctl_latency_check_task
+cpuctl_latency_test
+cpuctl_test01
+cpuctl_test02
+cpuctl_test03
+cpuctl_test04
+cpuset01
+cpuset_base_ops_testset.sh # glibc-only
+cpuset_cpu_hog # glibc-only
+cpuset_exclusive_test.sh # glibc-only
+cpuset_funcs.sh # glibc-only
+cpuset_hierarchy_test.sh # glibc-only
+cpuset_hotplug_test.sh # glibc-only
+cpuset_inherit_testset.sh # glibc-only
+cpuset_list_compute # glibc-only
+cpuset_load_balance_test.sh # glibc-only
+cpuset_mem_hog # glibc-only
+cpuset_memory_pressure # glibc-only
+cpuset_memory_pressure_testset.sh # glibc-only
+cpuset_memory_spread_testset.sh # glibc-only
+cpuset_memory_test # glibc-only
+cpuset_memory_testset.sh # glibc-only
+cpuset_regression_test.sh # glibc-only
+cpuset_sched_domains_check # glibc-only
+cpuset_sched_domains_test.sh # glibc-only

@@ -1,0 +1,30 @@
+cpuset_syscall_test # glibc-only
+cpuset_syscall_testset.sh # glibc-only
+crypto_user01
+crypto_user02
+cve-2014-0196
+cve-2015-3290
+cve-2016-10044
+cve-2016-7042
+cve-2016-7117
+cve-2017-16939
+cve-2017-17052
+cve-2017-17053
+cve-2017-2618
+cve-2017-2671
+cve-2022-4378
+data
+data_space
+ebizzy
+event_generator
+evm_overlay.sh
+execl01_child
+execle01_child
+execlp01_child
+execv01_child
+execve01_child
+execve06_child
+execve_child
+execveat_child
+execvp01_child
+filecapstest.sh

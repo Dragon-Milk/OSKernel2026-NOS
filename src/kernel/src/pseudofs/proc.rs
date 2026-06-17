@@ -87,6 +87,14 @@ const DUMMY_MEMINFO: &str = indoc! {"
     DirectMap1G:     1048576 kB
 "};
 
+const DUMMY_CPUINFO: &str = indoc! {"
+    processor\t: 0
+    vendor_id\t: starry
+    model name\t: StarryOS virtual CPU
+    cpu MHz\t\t: 1000.000
+    cache size\t: 0 KB
+"};
+
 pub fn new_procfs() -> Filesystem {
     SimpleFs::new_with("proc".into(), 0x9fa0, builder)
 }
@@ -369,6 +377,10 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         SimpleFile::new_regular(fs.clone(), || Ok(DUMMY_MEMINFO)),
     );
     root.add(
+        "cpuinfo",
+        SimpleFile::new_regular(fs.clone(), || Ok(DUMMY_CPUINFO)),
+    );
+    root.add(
         "meminfo2",
         SimpleFile::new_regular(fs.clone(), || {
             let allocator = axalloc::global_allocator();
@@ -412,6 +424,10 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             kernel.add(
                 "pid_max",
                 SimpleFile::new_regular(fs.clone(), || Ok("32768\n")),
+            );
+            kernel.add(
+                "tainted",
+                SimpleFile::new_regular(fs.clone(), || Ok("0\n")),
             );
 
             SimpleDir::new_maker(fs.clone(), Arc::new(kernel))

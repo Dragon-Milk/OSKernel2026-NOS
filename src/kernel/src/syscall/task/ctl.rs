@@ -138,6 +138,10 @@ pub fn sys_prctl(
             vm_write_slice(arg2 as _, &buf)?;
         }
         PR_SET_SECCOMP => {}
+        PR_SET_TIMERSLACK => {}
+        PR_GET_TIMERSLACK => {
+            return Ok(1_000_000);
+        }
         PR_MCE_KILL => {}
         PR_CAPBSET_READ => {
             // Return 0 (capability not in bounding set) since we don't

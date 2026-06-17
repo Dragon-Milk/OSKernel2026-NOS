@@ -1,6 +1,29 @@
 # Auto-generated from src/init/ltp-cases/*.txt.
 # This file is embedded into the init binary by src/init/main.rs.
 
+ltp_batch_ids() {
+    case "$1" in
+        process)
+            echo "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15"
+            ;;
+        fs)
+            echo "01 02 03 04 05 06 07 08 09 10 11 12 13"
+            ;;
+        mm-ipc)
+            echo "01 02 03 04 05 06 07 08 09"
+            ;;
+        mm-ipc-security)
+            echo "01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18"
+            ;;
+        common-easy)
+            echo "01"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 ltp_batch_cases() {
     category="$1"
     batch="$2"
@@ -1204,6 +1227,592 @@ ltp_batch_cases() {
                 'socketcall03' \
                 'socketpair01' \
                 'socketpair02'
+            ;;
+        mm-ipc-security:01)
+            printf '%s\n' \
+                'acct02_helper' \
+                'add_key01' \
+                'add_key02' \
+                'add_key03' \
+                'add_key04' \
+                'add_key05' \
+                'ask_password.sh' \
+                'aslr01' \
+                'assign_password.sh' \
+                'binfmt_misc01.sh' \
+                'binfmt_misc02.sh' \
+                'binfmt_misc_lib.sh' \
+                'bpf_map01' \
+                'bpf_prog01' \
+                'bpf_prog02' \
+                'bpf_prog03' \
+                'bpf_prog04' \
+                'bpf_prog05' \
+                'bpf_prog06' \
+                'bpf_prog07' \
+                'cap_bounds_r' \
+                'cap_bounds_rw' \
+                'cap_bset_inh_bounds' \
+                'capget01' \
+                'capget02' \
+                'capset01' \
+                'capset02' \
+                'capset03' \
+                'capset04' \
+                'cfs_bandwidth01'
+            ;;
+        mm-ipc-security:02)
+            printf '%s\n' \
+                'cgroup_core01' \
+                'cgroup_core02' \
+                'cgroup_core03' \
+                'cgroup_fj_common.sh' \
+                'cgroup_fj_function.sh' \
+                'cgroup_fj_proc' \
+                'cgroup_fj_stress.sh' \
+                'cgroup_lib.sh' \
+                'cgroup_regression_3_1.sh' \
+                'cgroup_regression_3_2.sh' \
+                'cgroup_regression_5_1.sh' \
+                'cgroup_regression_5_2.sh' \
+                'cgroup_regression_6_1.sh' \
+                'cgroup_regression_6_2.sh' \
+                'cgroup_regression_fork_processes' \
+                'cgroup_regression_getdelays' \
+                'cgroup_regression_test.sh' \
+                'cgroup_xattr' \
+                'change_password.sh' \
+                'check_keepcaps' \
+                'check_pe' \
+                'check_setkey' \
+                'check_simple_capset' \
+                'chroot01' \
+                'chroot02' \
+                'chroot03' \
+                'chroot04' \
+                'cpuacct.sh' \
+                'cpuacct_task' \
+                'cpuctl_def_task01'
+            ;;
+        mm-ipc-security:03)
+            printf '%s\n' \
+                'cpuctl_def_task02' \
+                'cpuctl_def_task03' \
+                'cpuctl_def_task04' \
+                'cpuctl_fj_cpu-hog' \
+                'cpuctl_fj_simple_echo' \
+                'cpuctl_latency_check_task' \
+                'cpuctl_latency_test' \
+                'cpuctl_test01' \
+                'cpuctl_test02' \
+                'cpuctl_test03' \
+                'cpuctl_test04' \
+                'cpuset01' \
+                'cpuset_base_ops_testset.sh' \
+                'cpuset_cpu_hog' \
+                'cpuset_exclusive_test.sh' \
+                'cpuset_funcs.sh' \
+                'cpuset_hierarchy_test.sh' \
+                'cpuset_hotplug_test.sh' \
+                'cpuset_inherit_testset.sh' \
+                'cpuset_list_compute' \
+                'cpuset_load_balance_test.sh' \
+                'cpuset_mem_hog' \
+                'cpuset_memory_pressure' \
+                'cpuset_memory_pressure_testset.sh' \
+                'cpuset_memory_spread_testset.sh' \
+                'cpuset_memory_test' \
+                'cpuset_memory_testset.sh' \
+                'cpuset_regression_test.sh' \
+                'cpuset_sched_domains_check' \
+                'cpuset_sched_domains_test.sh'
+            ;;
+        mm-ipc-security:04)
+            printf '%s\n' \
+                'cpuset_syscall_test' \
+                'cpuset_syscall_testset.sh' \
+                'crypto_user01' \
+                'crypto_user02' \
+                'cve-2014-0196' \
+                'cve-2015-3290' \
+                'cve-2016-10044' \
+                'cve-2016-7042' \
+                'cve-2016-7117' \
+                'cve-2017-16939' \
+                'cve-2017-17052' \
+                'cve-2017-17053' \
+                'cve-2017-2618' \
+                'cve-2017-2671' \
+                'cve-2022-4378' \
+                'data' \
+                'data_space' \
+                'ebizzy' \
+                'event_generator' \
+                'evm_overlay.sh' \
+                'execl01_child' \
+                'execle01_child' \
+                'execlp01_child' \
+                'execv01_child' \
+                'execve01_child' \
+                'execve06_child' \
+                'execve_child' \
+                'execveat_child' \
+                'execvp01_child' \
+                'filecapstest.sh'
+            ;;
+        mm-ipc-security:05)
+            printf '%s\n' \
+                'fork_freeze.sh' \
+                'freeze_cancel.sh' \
+                'freeze_kill_thaw.sh' \
+                'freeze_move_thaw.sh' \
+                'freeze_self_thaw.sh' \
+                'freeze_sleep_thaw.sh' \
+                'freeze_thaw.sh' \
+                'freeze_write_freezing.sh' \
+                'ftrace_lib.sh' \
+                'ftrace_regression01.sh' \
+                'ftrace_regression02.sh' \
+                'ftrace_stress_test.sh' \
+                'gdb01.sh' \
+                'get_mempolicy01' \
+                'get_mempolicy02' \
+                'get_robust_list01' \
+                'gethostid01' \
+                'getpagesize01' \
+                'getrandom01' \
+                'getrandom02' \
+                'getrandom03' \
+                'getrandom04' \
+                'getrandom05' \
+                'getrusage03_child' \
+                'hackbench' \
+                'hugefallocate01' \
+                'hugefallocate02' \
+                'hugefork01' \
+                'hugefork02' \
+                'hugemmap01'
+            ;;
+        mm-ipc-security:06)
+            printf '%s\n' \
+                'hugemmap02' \
+                'hugemmap04' \
+                'hugemmap05' \
+                'hugemmap06' \
+                'hugemmap07' \
+                'hugemmap08' \
+                'hugemmap09' \
+                'hugemmap10' \
+                'hugemmap11' \
+                'hugemmap12' \
+                'hugemmap13' \
+                'hugemmap14' \
+                'hugemmap15' \
+                'hugemmap16' \
+                'hugemmap17' \
+                'hugemmap18' \
+                'hugemmap19' \
+                'hugemmap20' \
+                'hugemmap21' \
+                'hugemmap22' \
+                'hugemmap23' \
+                'hugemmap24' \
+                'hugemmap25' \
+                'hugemmap26' \
+                'hugemmap27' \
+                'hugemmap28' \
+                'hugemmap29' \
+                'hugemmap30' \
+                'hugemmap31' \
+                'hugemmap32'
+            ;;
+        mm-ipc-security:07)
+            printf '%s\n' \
+                'hugeshmat01' \
+                'hugeshmat02' \
+                'hugeshmat03' \
+                'hugeshmat04' \
+                'hugeshmat05' \
+                'hugeshmctl01' \
+                'hugeshmctl02' \
+                'hugeshmctl03' \
+                'hugeshmdt01' \
+                'hugeshmget01' \
+                'hugeshmget02' \
+                'hugeshmget03' \
+                'hugeshmget05' \
+                'ima_boot_aggregate' \
+                'ima_conditionals.sh' \
+                'ima_kexec.sh' \
+                'ima_keys.sh' \
+                'ima_measurements.sh' \
+                'ima_mmap' \
+                'ima_policy.sh' \
+                'ima_selinux.sh' \
+                'ima_setup.sh' \
+                'ima_tpm.sh' \
+                'ima_violations.sh' \
+                'inh_capped' \
+                'iogen' \
+                'keyctl01' \
+                'keyctl01.sh' \
+                'keyctl02' \
+                'keyctl03'
+            ;;
+        mm-ipc-security:08)
+            printf '%s\n' \
+                'keyctl04' \
+                'keyctl05' \
+                'keyctl06' \
+                'keyctl07' \
+                'keyctl08' \
+                'keyctl09' \
+                'ksm01' \
+                'ksm02' \
+                'ksm03' \
+                'ksm04' \
+                'ksm05' \
+                'ksm06' \
+                'ksm07' \
+                'libcgroup_freezer' \
+                'lock_torture.sh' \
+                'mallinfo01' \
+                'mallinfo02' \
+                'mallinfo2_01' \
+                'mallocstress' \
+                'mallopt01' \
+                'max_map_count' \
+                'mbind01' \
+                'mbind02' \
+                'mbind03' \
+                'mbind04' \
+                'meltdown' \
+                'mem02' \
+                'mem_process' \
+                'membarrier01' \
+                'memcg_control_test.sh'
+            ;;
+        mm-ipc-security:09)
+            printf '%s\n' \
+                'memcg_failcnt.sh' \
+                'memcg_force_empty.sh' \
+                'memcg_lib.sh' \
+                'memcg_limit_in_bytes.sh' \
+                'memcg_max_usage_in_bytes_test.sh' \
+                'memcg_memsw_limit_in_bytes_test.sh' \
+                'memcg_move_charge_at_immigrate_test.sh' \
+                'memcg_process' \
+                'memcg_process_stress' \
+                'memcg_regression_test.sh' \
+                'memcg_stat_rss.sh' \
+                'memcg_stat_test.sh' \
+                'memcg_stress_test.sh' \
+                'memcg_subgroup_charge.sh' \
+                'memcg_test_1' \
+                'memcg_test_2' \
+                'memcg_test_3' \
+                'memcg_test_4' \
+                'memcg_test_4.sh' \
+                'memcg_usage_in_bytes_test.sh' \
+                'memcg_use_hierarchy_test.sh' \
+                'memcontrol01' \
+                'memcontrol02' \
+                'memcontrol03' \
+                'memcontrol04' \
+                'memctl_test01' \
+                'memfd_create01' \
+                'memfd_create02' \
+                'memfd_create03' \
+                'memfd_create04'
+            ;;
+        mm-ipc-security:10)
+            printf '%s\n' \
+                'memtoy' \
+                'mesgq_nstest' \
+                'migrate_pages01' \
+                'migrate_pages02' \
+                'migrate_pages03' \
+                'min_free_kbytes' \
+                'mlock01' \
+                'mlock02' \
+                'mlock03' \
+                'mlock04' \
+                'mlock05' \
+                'mlock201' \
+                'mlock202' \
+                'mlock203' \
+                'mlockall01' \
+                'mlockall02' \
+                'mlockall03' \
+                'mmapstress01' \
+                'mmapstress02' \
+                'mmapstress03' \
+                'mmapstress04' \
+                'mmapstress05' \
+                'mmapstress06' \
+                'mmapstress07' \
+                'mmapstress08' \
+                'mmapstress09' \
+                'mmapstress10' \
+                'mmstress' \
+                'mmstress_dummy' \
+                'move_pages01'
+            ;;
+        mm-ipc-security:11)
+            printf '%s\n' \
+                'move_pages02' \
+                'move_pages03' \
+                'move_pages04' \
+                'move_pages05' \
+                'move_pages06' \
+                'move_pages07' \
+                'move_pages09' \
+                'move_pages10' \
+                'move_pages11' \
+                'move_pages12' \
+                'mqns_01' \
+                'mqns_02' \
+                'mqns_03' \
+                'mqns_04' \
+                'msgstress01' \
+                'mtest01' \
+                'munlock01' \
+                'munlock02' \
+                'munlockall01' \
+                'numa01.sh' \
+                'oom01' \
+                'oom02' \
+                'oom03' \
+                'oom04' \
+                'oom05' \
+                'overcommit_memory' \
+                'page01' \
+                'page02' \
+                'pcrypt_aead01' \
+                'perf_event_open01'
+            ;;
+        mm-ipc-security:12)
+            printf '%s\n' \
+                'perf_event_open02' \
+                'perf_event_open03' \
+                'pidns01' \
+                'pidns02' \
+                'pidns03' \
+                'pidns04' \
+                'pidns05' \
+                'pidns06' \
+                'pidns10' \
+                'pidns12' \
+                'pidns13' \
+                'pidns16' \
+                'pidns17' \
+                'pidns20' \
+                'pidns30' \
+                'pidns31' \
+                'pidns32' \
+                'pids.sh' \
+                'pids_task1' \
+                'pids_task2' \
+                'pipe2_02_child' \
+                'pivot_root01' \
+                'pkey01' \
+                'print_caps' \
+                'proc01' \
+                'process_madvise01' \
+                'process_vm01' \
+                'process_vm_readv02' \
+                'process_vm_readv03' \
+                'process_vm_writev02'
+            ;;
+        mm-ipc-security:13)
+            printf '%s\n' \
+                'profil01' \
+                'prot_hsymlinks' \
+                'pt_test' \
+                'ptem01' \
+                'pthcli' \
+                'pthserv' \
+                'pty01' \
+                'pty02' \
+                'pty03' \
+                'pty04' \
+                'pty05' \
+                'pty06' \
+                'pty07' \
+                'rcu_torture.sh' \
+                'reboot01' \
+                'reboot02' \
+                'remap_file_pages01' \
+                'remap_file_pages02' \
+                'remove_password.sh' \
+                'request_key01' \
+                'request_key02' \
+                'request_key03' \
+                'request_key04' \
+                'request_key05' \
+                'run_capbounds.sh' \
+                'run_cpuctl_latency_test.sh' \
+                'run_cpuctl_stress_test.sh' \
+                'run_cpuctl_test.sh' \
+                'run_cpuctl_test_fj.sh' \
+                'run_freezer.sh'
+            ;;
+        mm-ipc-security:14)
+            printf '%s\n' \
+                'run_memctl_test.sh' \
+                'run_sched_cliserv.sh' \
+                'runpwtests01.sh' \
+                'runpwtests02.sh' \
+                'runpwtests03.sh' \
+                'runpwtests04.sh' \
+                'runpwtests05.sh' \
+                'runpwtests06.sh' \
+                'runpwtests_exclusive01.sh' \
+                'runpwtests_exclusive02.sh' \
+                'runpwtests_exclusive03.sh' \
+                'runpwtests_exclusive04.sh' \
+                'runpwtests_exclusive05.sh' \
+                'sbrk01' \
+                'sbrk02' \
+                'sbrk03' \
+                'sched_datafile' \
+                'sched_driver' \
+                'sched_stress.sh' \
+                'set_mempolicy01' \
+                'set_mempolicy02' \
+                'set_mempolicy03' \
+                'set_mempolicy04' \
+                'set_mempolicy05' \
+                'set_robust_list01' \
+                'setns01' \
+                'setns02' \
+                'setpgid03_child' \
+                'smack_common.sh' \
+                'smack_file_access.sh'
+            ;;
+        mm-ipc-security:15)
+            printf '%s\n' \
+                'smack_notroot' \
+                'smack_set_ambient.sh' \
+                'smack_set_cipso.sh' \
+                'smack_set_current.sh' \
+                'smack_set_direct.sh' \
+                'smack_set_doi.sh' \
+                'smack_set_load.sh' \
+                'smack_set_netlabel.sh' \
+                'smack_set_onlycap.sh' \
+                'smack_set_socket_labels' \
+                'ssh-stress.sh' \
+                'stack_clash' \
+                'stack_space' \
+                'starvation' \
+                'stop_freeze_sleep_thaw_cont.sh' \
+                'stop_freeze_thaw_cont.sh' \
+                'stream01' \
+                'stream02' \
+                'stream03' \
+                'stream04' \
+                'stream05' \
+                'stress' \
+                'support_numa' \
+                'swapoff01' \
+                'swapoff02' \
+                'swapon01' \
+                'swapon02' \
+                'swapon03' \
+                'swapping01' \
+                'syscall01'
+            ;;
+        mm-ipc-security:16)
+            printf '%s\n' \
+                'sysconf01' \
+                'sysctl01' \
+                'sysctl01.sh' \
+                'sysctl02.sh' \
+                'sysctl03' \
+                'sysctl04' \
+                'sysinfo01' \
+                'sysinfo02' \
+                'sysinfo03' \
+                'syslog11' \
+                'syslog12' \
+                'test_controllers.sh' \
+                'test_robind.sh' \
+                'thp01' \
+                'thp02' \
+                'thp03' \
+                'thp04' \
+                'timed_forkbomb' \
+                'timens01' \
+                'tst_brk' \
+                'tst_brkm' \
+                'tst_cgctl' \
+                'tst_check_drivers' \
+                'tst_check_kconfigs' \
+                'tst_checkpoint' \
+                'tst_exit' \
+                'tst_get_free_pids' \
+                'tst_get_median' \
+                'tst_get_unused_port' \
+                'tst_getconf'
+            ;;
+        mm-ipc-security:17)
+            printf '%s\n' \
+                'tst_hexdump' \
+                'tst_kvcmp' \
+                'tst_lockdown_enabled' \
+                'tst_ncpus' \
+                'tst_ncpus_conf' \
+                'tst_ncpus_max' \
+                'tst_ns_create' \
+                'tst_ns_exec' \
+                'tst_ns_ifmove' \
+                'tst_random' \
+                'tst_res' \
+                'tst_resm' \
+                'tst_rod' \
+                'tst_secureboot_enabled' \
+                'tst_security.sh' \
+                'tst_sleep' \
+                'tst_supported_fs' \
+                'tst_test.sh' \
+                'tst_timeout_kill' \
+                'unshare01' \
+                'unshare01.sh' \
+                'unshare02' \
+                'userfaultfd01' \
+                'userns01' \
+                'userns02' \
+                'userns03' \
+                'userns04' \
+                'userns05' \
+                'userns06' \
+                'userns06_capcheck'
+            ;;
+        mm-ipc-security:18)
+            printf '%s\n' \
+                'userns07' \
+                'userns08' \
+                'verify_caps_exec' \
+                'vfork_freeze.sh' \
+                'vhangup01' \
+                'vhangup02' \
+                'vma01' \
+                'vma02' \
+                'vma03' \
+                'vma04' \
+                'vma05.sh' \
+                'vma05_vdso' \
+                'wqueue01' \
+                'wqueue02' \
+                'wqueue03' \
+                'wqueue04' \
+                'wqueue05' \
+                'wqueue06' \
+                'wqueue07' \
+                'wqueue08' \
+                'wqueue09' \
+                'write_freezing.sh'
             ;;
         common-easy:01)
             printf '%s\n' \
