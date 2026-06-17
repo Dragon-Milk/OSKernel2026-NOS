@@ -14,7 +14,7 @@ export VSOCK := n
 export MEM := 1G
 export ICOUNT := n
 export TEST_PROFILE ?= ltp-batch
-export LTP_CATEGORY ?= process
+export LTP_CATEGORY ?= mm-ipc
 export LTP_BATCH ?= all
 export LTP_LIBC ?= both
 
