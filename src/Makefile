@@ -14,9 +14,10 @@ export VSOCK := n
 export MEM := 1G
 export ICOUNT := n
 export TEST_PROFILE ?= ltp-batch
-export LTP_CATEGORY ?= process
+export LTP_CATEGORY ?= net-all
 export LTP_BATCH ?= all
 export LTP_LIBC ?= both
+export LTP_TIMEOUT ?= 30
 
 # Generated Options
 export A := $(CURDIR)

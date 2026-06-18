@@ -4,32 +4,14 @@ export HOME=/root
 export USER=root
 export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
 
-# Set SKIP_LTP=0 to run the original ltp_testcode.sh scripts again.
-# ============================================================
-# Select test profile here.
-# stable        : current safe 910-score profile
-# cyc-musl      : run musl cyclictest only
-# cyc-all       : run glibc and musl cyclictest only
-# libctest      : run glibc and musl libctest only
-# iozone        : run glibc and musl iozone to verify sys_sync/syncfs
-# lmbench       : run glibc and musl lmbench only
-# lmbench-only  : run original glibc lmbench script
-# lmbench-fast  : run trimmed glibc lmbench
-# ltp-only      : run glibc and musl ltp only
-# ltp-list      : list glibc and musl ltp testcase names only
-# ltp-batch     : run embedded phase1 LTP category batches
-# perf          : run stable profile with kernel-side perf summary when built with perf-profile
-# unixbench     : run glibc and musl unixbench only
-# wait-repro    : run wait/libctest/lmbench/unixbench repro
-# full          : scan and run all testcode scripts
-# ============================================================
 SKIP_LTP=${SKIP_LTP:-0}
 TEST_PROFILE=${TEST_PROFILE:-ltp-batch}
 LTP_CATEGORY=${LTP_CATEGORY:-process}
 LTP_BATCH=${LTP_BATCH:-all}
 LTP_LIBC=${LTP_LIBC:-both}
+LTP_TIMEOUT=${LTP_TIMEOUT:-30}
 echo "[init] TEST_PROFILE=$TEST_PROFILE"
-echo "[init] LTP_CATEGORY=$LTP_CATEGORY LTP_BATCH=$LTP_BATCH LTP_LIBC=$LTP_LIBC"
+echo "[init] LTP_CATEGORY=$LTP_CATEGORY LTP_BATCH=$LTP_BATCH LTP_LIBC=$LTP_LIBC LTP_TIMEOUT=$LTP_TIMEOUT"
 
 run_with_shell() {
     script="$1"
@@ -296,9 +278,12 @@ run_ltp_dir() {
             [ -f "$file" ] || continue
 
             echo "RUN LTP CASE $name"
-            "$file"
+            "$file" </dev/null
             ret=$?
-            echo "FAIL LTP CASE $name : $ret"
+            case "$ret" in
+                0) echo "PASS LTP CASE $name : $ret" ;;
+                *) echo "FAIL LTP CASE $name : $ret" ;;
+            esac
         done
 
         cd /
@@ -343,6 +328,149 @@ run_ltp_list_tests() {
     run_ltp_list_libc musl /musl/ltp/testcases/bin
 }
 
+run_ltp_case_file() {
+    file="$1"
+    _case_ret=0
+
+    if [ "$LTP_TIMEOUT" = "0" ]; then
+        "$file" </dev/null
+        _case_ret=$?
+        return $_case_ret
+    fi
+
+    case "$LTP_TIMEOUT" in
+        ''|*[!0-9]*)
+            echo "[LTP-BATCH-TIMEOUT-DISABLED] invalid LTP_TIMEOUT=$LTP_TIMEOUT"
+            LTP_TIMEOUT=0
+            "$file" </dev/null
+            _case_ret=$?
+            return $_case_ret
+            ;;
+    esac
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$LTP_TIMEOUT" "$file" </dev/null
+        _case_ret=$?
+        return $_case_ret
+    fi
+
+    bb="$(busybox_cmd)"
+    if [ -z "$bb" ]; then
+        echo "[LTP-BATCH-TIMEOUT-DISABLED] timeout command not found and no busybox timer available"
+        LTP_TIMEOUT=0
+        "$file" </dev/null
+        _case_ret=$?
+        return $_case_ret
+    fi
+
+    "$file" </dev/null &
+    child=$!
+    (
+        "$bb" sleep "$LTP_TIMEOUT"
+        if "$bb" kill -0 "$child" >/dev/null 2>&1; then
+            "$bb" kill -TERM "$child" >/dev/null 2>&1
+            "$bb" sleep 1
+            "$bb" kill -KILL "$child" >/dev/null 2>&1
+        fi
+    ) &
+    timer=$!
+
+    wait "$child"
+    _case_ret=$?
+    "$bb" kill "$timer" >/dev/null 2>&1
+    wait "$timer" >/dev/null 2>&1
+
+    case "$_case_ret" in
+        137|143) return 124 ;;
+        *) return "$_case_ret" ;;
+    esac
+}
+
+ltp_has_case() {
+    dir="$1"
+    shift
+    [ -d "$dir" ] || return 1
+    for name in "$@"; do
+        [ -f "$dir/$name" ] && return 0
+    done
+    return 1
+}
+
+ltp_bin_dir() {
+    libc="$1"
+    shift
+
+    libc_dir="/$libc"
+
+    for candidate in \
+        "$libc_dir/ltp/testcases/bin" \
+        /ltp/testcases/bin \
+        ./ltp/testcases/bin \
+        . \
+        "$libc_dir" \
+        ./*/ltp/testcases/bin \
+        ./*/*/ltp/testcases/bin
+    do
+        if ltp_has_case "$candidate" "$@"; then
+            cd "$candidate" && pwd
+            return
+        fi
+    done
+
+    return 1
+}
+
+ltp_no_bin() {
+    libc="$1"
+    batches="$2"
+    shift 2
+
+    echo "[LTP-BATCH-DIAG] ls /"
+    if command -v ls >/dev/null 2>&1; then
+        ls /
+    else
+        bb="$(busybox_cmd)"
+        if [ -n "$bb" ]; then
+            "$bb" ls /
+        else
+            echo "[LTP-BATCH-DIAG] ls unavailable"
+        fi
+    fi
+
+    for path in "/$libc" /glibc /musl /ltp; do
+        if [ -d "$path" ] || [ -f "$path" ]; then
+            echo "[LTP-BATCH-DIAG] exists $path yes"
+        else
+            echo "[LTP-BATCH-DIAG] exists $path no"
+        fi
+    done
+
+    for name in "$@"; do
+        echo "[LTP-BATCH-DIAG] case $name"
+    done
+    echo "[LTP-BATCH-ERROR] ltp bin dir not found: libc=$libc category=$LTP_CATEGORY batches=$batches"
+}
+
+ltp_exit_label() {
+    # LTP exit codes: 0=TPASS 1=TFAIL 2=TBROK 4=TWARN 32=TCONF
+    # timeout (124), killed-by-signal (137=SIGKILL, 143=SIGTERM)
+    case "$1" in
+        0)   echo "PASS" ;;
+        1)   echo "FAIL" ;;
+        2)   echo "BROK" ;;
+        4)   echo "WARN" ;;
+        32)  echo "CONF" ;;
+        124) echo "TIMEOUT" ;;
+        125) echo "TIMEOUT-ERR" ;;
+        126) echo "EXEC-ERR" ;;
+        127) echo "NOT-FOUND" ;;
+        137) echo "KILLED" ;;
+        139) echo "SEGV" ;;
+        143) echo "TERM" ;;
+        *)   echo "UNKNOWN" ;;
+    esac
+}
+
 run_ltp_one_batch_libc() {
     libc="$1"
     batch="$2"
@@ -351,17 +479,29 @@ run_ltp_one_batch_libc() {
 
     ltp_batch_cases "$LTP_CATEGORY" "$batch" | while read name; do
         [ -n "$name" ] || continue
-        file="ltp/testcases/bin/$name"
+        file="./$name"
 
         if [ ! -f "$file" ]; then
-            echo "[LTP-BATCH-MISSING] $libc $name: $dir/$file"
+            echo "[LTP-BATCH-MISSING] $libc $name: $LTP_BIN/$name"
             continue
         fi
 
         echo "RUN LTP CASE $name"
-        "$file"
-        ret=$?
-        echo "FAIL LTP CASE $name : $ret"
+        run_ltp_case_file "$file"
+        case_ret=$?
+        label="$(ltp_exit_label "$case_ret")"
+        case "$case_ret" in
+            0)
+                echo "PASS LTP CASE $name : $case_ret"
+                ;;
+            124|137|143)
+                echo "[LTP-BATCH-TIMEOUT] $libc $name after ${LTP_TIMEOUT}s : $case_ret"
+                echo "TIMEOUT LTP CASE $name : $case_ret"
+                ;;
+            *)
+                echo "$label LTP CASE $name : $case_ret"
+                ;;
+        esac
     done
 }
 
@@ -377,29 +517,13 @@ run_ltp_batch_libc() {
             ;;
     esac
 
-    target_dir="$dir/ltp/testcases/bin"
     group="ltp-$libc"
 
     echo "#### OS COMP TEST GROUP START $group ####"
 
-    if [ ! -d "$target_dir" ]; then
-        echo "[LTP-BATCH-ERROR] $libc directory not found: $target_dir"
-        echo "#### OS COMP TEST GROUP END $group ####"
-        return
-    fi
-
-    if ! cd "$dir"; then
-        echo "[LTP-BATCH-ERROR] cannot cd to $dir"
-        echo "#### OS COMP TEST GROUP END $group ####"
-        return
-    fi
-
-    set_library_path "$dir"
-
     if [ "$LTP_BATCH" = "all" ]; then
         batches="$(ltp_batch_ids "$LTP_CATEGORY")" || {
             echo "[LTP-BATCH-ERROR] unknown category: $LTP_CATEGORY"
-            cd /
             echo "#### OS COMP TEST GROUP END $group ####"
             return
         }
@@ -409,10 +533,45 @@ run_ltp_batch_libc() {
 
     echo "[LTP-BATCH-PLAN] category=$LTP_CATEGORY batches=$batches libc=$libc"
 
+    first_cases=""
+    first_count=0
+    for batch in $batches; do
+        cases="$(ltp_batch_cases "$LTP_CATEGORY" "$batch")" || {
+            echo "[LTP-BATCH-ERROR] batch not found: category=$LTP_CATEGORY batch=$batch"
+            echo "#### OS COMP TEST GROUP END $group ####"
+            return
+        }
+        for name in $cases; do
+            if [ "$first_count" -lt 5 ]; then
+                first_cases="$first_cases $name"
+                first_count=$((first_count + 1))
+            fi
+        done
+    done
+
+    LTP_BIN="$(ltp_bin_dir "$libc" $first_cases)" || {
+        ltp_no_bin "$libc" "$batches" $first_cases
+        echo "#### OS COMP TEST GROUP END $group ####"
+        return
+    }
+    export LTP_BIN
+    echo "[LTP-BATCH-LTP-BIN] libc=$libc dir=$LTP_BIN"
+
+    if ! cd "$LTP_BIN"; then
+        echo "[LTP-BATCH-ERROR] cannot cd to ltp bin dir: $LTP_BIN"
+        echo "#### OS COMP TEST GROUP END $group ####"
+        return
+    fi
+
+    set_library_path "$dir"
+    old_path="$PATH"
+    export PATH="$LTP_BIN:$PATH"
+
     for batch in $batches; do
         run_ltp_one_batch_libc "$libc" "$batch"
     done
 
+    export PATH="$old_path"
     cd /
     echo "#### OS COMP TEST GROUP END $group ####"
 }
@@ -421,7 +580,7 @@ run_ltp_batch_tests() {
     found=1
 
     case "$LTP_CATEGORY" in
-        process|fs|mm-ipc|common-easy) ;;
+        process|fs|mm-ipc|common-easy|net|net-core|net-all|net-script|net-deferred) ;;
         *)
             echo "[LTP-BATCH-ERROR] unsupported category: $LTP_CATEGORY"
             return
@@ -493,24 +652,6 @@ run_wait_repro_tests() {
 
 cd /
 
-# ============================================================
-# Single test mode: uncomment one of the lines below to run a
-# specific test instead of the full suite.
-# ============================================================
-
-# --- basic tests (test_sleep, test_getpid, etc.) ---
-# set_library_path /glibc && cd /glibc && run_with_shell ./basic_testcode.sh
-
-# --- busybox tests ---
-# set_library_path /glibc && cd /glibc && run_with_shell ./busybox_testcode.sh
-
-# --- cyclictest only (NO_STRESS + STRESS) ---
-# set_library_path /glibc && cd /glibc && run_with_shell ./cyclictest_testcode.sh
-
-# --- unixbench only ---
-# set_library_path /glibc && cd /glibc && run_with_shell ./unixbench_testcode.sh
-
-# --- full test suite (comment out the single test above) ---
 found=0
 case "$TEST_PROFILE" in
     stable)

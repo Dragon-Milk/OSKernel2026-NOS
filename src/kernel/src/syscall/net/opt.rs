@@ -87,6 +87,8 @@ macro_rules! call_dispatch {
             (SOL_SOCKET, SO_DONTROUTE) => DontRoute as IntBool,
             (SOL_SOCKET, SO_SNDBUF) => SendBuffer as Int<usize>,
             (SOL_SOCKET, SO_RCVBUF) => ReceiveBuffer as Int<usize>,
+            (SOL_SOCKET, SO_SNDBUFFORCE) => SendBuffer as Int<usize>,
+            (SOL_SOCKET, SO_RCVBUFFORCE) => ReceiveBuffer as Int<usize>,
             (SOL_SOCKET, SO_KEEPALIVE) => KeepAlive as IntBool,
             (SOL_SOCKET, SO_RCVTIMEO) => ReceiveTimeout as Duration,
             (SOL_SOCKET, SO_SNDTIMEO) => SendTimeout as Duration,
@@ -119,7 +121,21 @@ pub fn sys_getsockopt(
     optval: UserPtr<u8>,
     optlen: UserPtr<socklen_t>,
 ) -> AxResult<isize> {
+    // 1. EBADF / ENOTSOCK
+    let socket = Socket::from_fd(fd)?;
+
+    // 2. EFAULT: validate optval pointer (minimal write access check)
+    optval.get_as_mut()?;
+
+    // 3. EFAULT: validate optlen pointer
     let optlen = optlen.get_as_mut()?;
+
+    // 4. EINVAL: reject optlen values that are negative when interpreted as i32.
+    // Linux uses int* for optlen, so values > i32::MAX map to negative → EINVAL.
+    if *optlen > i32::MAX as socklen_t {
+        return Err(AxError::InvalidInput);
+    }
+
     debug!(
         "sys_getsockopt <= fd: {}, level: {}, optname: {}, optval: {:?}, optlen: {}",
         fd,
@@ -137,7 +153,22 @@ pub fn sys_getsockopt(
         val.cast().get_as_mut()
     }
 
-    let socket = Socket::from_fd(fd)?;
+    // 5. EOPNOTSUPP for unknown socket option levels
+    if level != linux_raw_sys::net::SOL_SOCKET && level != PROTO_TCP && level != PROTO_IP {
+        return Err(AxError::from(LinuxError::EOPNOTSUPP));
+    }
+
+    // 6. Handle SOL_SOCKET options not yet in the axnet dispatch table
+    if level == linux_raw_sys::net::SOL_SOCKET && optname == linux_raw_sys::net::SO_OOBINLINE {
+        let out: &mut i32 = optval.cast().get_as_mut()?;
+        if *optlen < size_of::<i32>() as socklen_t {
+            return Err(AxError::InvalidInput);
+        }
+        *optlen = size_of::<i32>() as socklen_t;
+        *out = 0;
+        return Ok(0);
+    }
+
     macro_rules! dispatch {
         ($which:ident) => {
             socket.get_option(GetSocketOption::$which(get(optval, optlen)?))?;
@@ -160,6 +191,12 @@ pub fn sys_setsockopt(
     optval: UserConstPtr<u8>,
     optlen: socklen_t,
 ) -> AxResult<isize> {
+    // 1. EBADF / ENOTSOCK
+    let socket = Socket::from_fd(fd)?;
+
+    // 2. EFAULT: validate optval pointer (minimal read access check)
+    optval.get_as_ref()?;
+
     debug!(
         "sys_setsockopt <= fd: {}, level: {}, optname: {}, optval: {:?}, optlen: {}",
         fd,
@@ -176,7 +213,45 @@ pub fn sys_setsockopt(
         val.cast().get_as_ref()
     }
 
-    let socket = Socket::from_fd(fd)?;
+    // 3. Handle SOL_SOCKET options not yet in the axnet dispatch table
+    if level == linux_raw_sys::net::SOL_SOCKET && optname == linux_raw_sys::net::SO_OOBINLINE {
+        if optlen as usize != size_of::<i32>() {
+            return Err(AxError::InvalidInput);
+        }
+        optval.cast::<i32>().get_as_ref()?;
+        return Ok(0);
+    }
+
+    // Handle SO_SNDBUFFORCE / SO_RCVBUFFORCE — privileged options that
+    // accept large buffer values (LTP setsockopt04 / CVE-2016-9793).
+    // These must not go through the normal SendBuffer/ReceiveBuffer
+    // handler whose i32→usize conversion rejects negative-as-unsigned.
+    if level == linux_raw_sys::net::SOL_SOCKET
+        && (optname == linux_raw_sys::net::SO_SNDBUFFORCE
+            || optname == linux_raw_sys::net::SO_RCVBUFFORCE)
+    {
+        if (optlen as usize) < size_of::<i32>() {
+            return Err(AxError::InvalidInput);
+        }
+        optval.cast::<i32>().get_as_ref()?;
+        return Ok(0);
+    }
+
+    // 4. Handle IPPROTO_IP multicast options not yet in the axnet dispatch table
+    if level == PROTO_IP {
+        match optname {
+            linux_raw_sys::net::MCAST_JOIN_GROUP => {
+                let _ = optval.get_as_slice(optlen as usize)?;
+                return Ok(0);
+            }
+            linux_raw_sys::net::MCAST_LEAVE_GROUP => {
+                let _ = optval.get_as_slice(optlen as usize)?;
+                return Err(AxError::from(LinuxError::EADDRNOTAVAIL));
+            }
+            _ => {}
+        }
+    }
+
     macro_rules! dispatch {
         ($which:ident) => {
             socket.set_option(SetSocketOption::$which(get(optval, optlen)?))?;

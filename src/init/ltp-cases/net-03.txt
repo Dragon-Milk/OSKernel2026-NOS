@@ -1,0 +1,6 @@
+socketcall01
+socketcall02
+socketcall03
+socketpair01
+socketpair02
+sockioctl01
