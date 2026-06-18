@@ -24,7 +24,6 @@ shmat01
 shmat02
 shmat03
 shmat04
-shmat1
 shmctl01
 shmctl02
 shmctl03

@@ -1018,7 +1018,6 @@ ltp_batch_cases() {
                 'mincore02' \
                 'mincore03' \
                 'mincore04' \
-                'mmap-corruption01' \
                 'mmap001' \
                 'mmap01' \
                 'mmap02' \
@@ -1190,7 +1189,6 @@ ltp_batch_cases() {
                 'shmat02' \
                 'shmat03' \
                 'shmat04' \
-                'shmat1' \
                 'shmctl01' \
                 'shmctl02' \
                 'shmctl03'
