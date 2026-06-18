@@ -11,7 +11,7 @@ use linux_raw_sys::net::{
 use super::addr::SocketAddrExt;
 use crate::{
     file::{FileLike, Socket, add_file_like},
-    mm::{IoVec, IoVectorBuf, UserConstPtr, UserPtr, VmBytes, VmBytesMut},
+    mm::{IoVec, IoVectorBuf, UserConstPtr, UserPtr, VmBytes, VmBytesMut, check_access},
     syscall::net::{CMsg, CMsgBuilder},
 };
 
@@ -23,6 +23,10 @@ fn send_impl(
     addrlen: socklen_t,
     cmsg: Vec<CMsgData>,
 ) -> AxResult<isize> {
+    // Validate fd first (EBADF/ENOTSOCK priority)
+    let socket = Socket::from_fd(fd)?;
+
+    // Then resolve destination address
     let addr = if addr.is_null() || addrlen == 0 {
         None
     } else {
@@ -31,7 +35,6 @@ fn send_impl(
 
     debug!("sys_send <= fd: {fd}, flags: {flags}, addr: {addr:?}");
 
-    let socket = Socket::from_fd(fd)?;
     let sent = socket.send(
         &mut src,
         SendOptions {
@@ -52,6 +55,11 @@ pub fn sys_sendto(
     addr: UserConstPtr<sockaddr>,
     addrlen: socklen_t,
 ) -> AxResult<isize> {
+    // Validate send buffer memory early — catches obviously bad addresses
+    // like (void *)-1 before the address resolution path runs.
+    if len > 0 && !buf.is_null() {
+        check_access(buf as usize, len).map_err(AxError::from)?;
+    }
     send_impl(fd, VmBytes::new(buf, len), flags, addr, addrlen, Vec::new())
 }
 

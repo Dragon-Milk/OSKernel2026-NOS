@@ -12,7 +12,7 @@ use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
     net::{
         AF_INET, AF_UNIX, AF_VSOCK, IPPROTO_TCP, IPPROTO_UDP, SHUT_RD, SHUT_RDWR, SHUT_WR,
-        SOCK_DGRAM, SOCK_SEQPACKET, SOCK_STREAM, sockaddr, socklen_t,
+        SOCK_DGRAM, SOCK_RAW, SOCK_RDM, SOCK_SEQPACKET, SOCK_STREAM, sockaddr, socklen_t,
     },
 };
 
@@ -48,8 +48,13 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
             SocketInner::Vsock(VsockSocket::new(VsockStreamTransport::new()))
         }
         (AF_INET, _) | (AF_UNIX, _) | (AF_VSOCK, _) => {
-            warn!("Unsupported socket type: domain: {domain}, ty: {ty}");
-            return Err(AxError::from(LinuxError::ESOCKTNOSUPPORT));
+            if matches!(ty, SOCK_RAW | SOCK_RDM) {
+                // Valid socket types not supported by this implementation
+                return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
+            }
+            // Completely invalid socket type (not matching any known constant)
+            warn!("Invalid socket type: domain: {domain}, ty: {ty}");
+            return Err(AxError::from(LinuxError::EINVAL));
         }
         _ => {
             return Err(AxError::from(LinuxError::EAFNOSUPPORT));
@@ -158,8 +163,45 @@ pub fn sys_socketpair(
     debug!("sys_socketpair <= domain: {domain}, ty: {raw_ty}, proto: {proto}");
     let ty = raw_ty & 0xFF;
 
-    if domain != AF_UNIX {
+    // Validate domain first (invalid/unsupported domain → EAFNOSUPPORT)
+    if !matches!(domain, AF_INET | AF_UNIX | AF_VSOCK) {
         return Err(AxError::from(LinuxError::EAFNOSUPPORT));
+    }
+
+    // Validate socket type (Linux: type checked before protocol)
+    match ty {
+        SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET => {
+            // Valid types — proceed to protocol/domain checks
+        }
+        SOCK_RAW | SOCK_RDM => {
+            // Known but unsupported socket types
+            return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
+        }
+        _ => {
+            // Completely invalid socket type
+            return Err(AxError::from(LinuxError::EINVAL));
+        }
+    }
+
+    // Validate protocol for AF_INET (same logic as sys_socket)
+    if domain == AF_INET {
+        match ty {
+            SOCK_STREAM => {
+                if proto != 0 && proto != IPPROTO_TCP as _ {
+                    return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
+                }
+            }
+            SOCK_DGRAM => {
+                if proto != 0 && proto != IPPROTO_UDP as _ {
+                    return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if domain != AF_UNIX {
+        return Err(AxError::from(LinuxError::EOPNOTSUPP));
     }
 
     let pid = current().as_thread().proc_data.proc.pid();
@@ -174,7 +216,7 @@ pub fn sys_socketpair(
         }
         _ => {
             warn!("Unsupported socketpair type: {ty}");
-            return Err(AxError::from(LinuxError::ESOCKTNOSUPPORT));
+            return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
         }
     };
     let sock1 = Socket(SocketInner::Unix(sock1));
