@@ -23,7 +23,7 @@ use linux_raw_sys::general::{
     O_NOATIME, O_WRONLY,
 };
 
-use super::{FileLike, Kstat, get_file_like};
+use super::{FileLike, Kstat, get_file_like, get_inode_flags};
 use crate::{
     file::{FileOwnerEx, IoDst, IoSrc, record_lock},
     mm::busybox_applet,
@@ -371,7 +371,9 @@ impl ResolveAtResult {
             Self::File(loc) => {
                 let metadata = loc.metadata()?;
                 let rdev = loc.user_data().get::<DeviceId>().map(|d| *d).unwrap_or(metadata.rdev);
-                Ok(metadata_to_kstat_with_rdev(&metadata, rdev, Some(loc)))
+                let mut kstat = metadata_to_kstat_with_rdev(&metadata, rdev, Some(loc));
+                kstat.attributes = get_inode_flags(loc);
+                Ok(kstat)
             }
             Self::Other(file_like) => file_like.stat(),
         }
@@ -471,6 +473,7 @@ pub fn metadata_to_kstat_with_rdev(metadata: &Metadata, rdev: DeviceId, loc: Opt
         blksize: metadata.block_size as _,
         blocks: metadata.blocks,
         rdev,
+        attributes: 0,
         atime: metadata.atime,
         mtime: metadata.mtime,
         ctime: metadata.ctime,
@@ -553,7 +556,9 @@ impl FileLike for File {
         let metadata = loc.metadata()?;
         // Check for device node rdev stored in user_data (from mknod).
         let rdev = loc.user_data().get::<DeviceId>().map(|d| *d).unwrap_or(metadata.rdev);
-        Ok(metadata_to_kstat_with_rdev(&metadata, rdev, Some(loc)))
+        let mut kstat = metadata_to_kstat_with_rdev(&metadata, rdev, Some(loc));
+        kstat.attributes = get_inode_flags(loc);
+        Ok(kstat)
     }
 
     fn ioctl(&self, cmd: u32, arg: usize) -> AxResult<usize> {
@@ -690,7 +695,9 @@ impl FileLike for Directory {
     fn stat(&self) -> AxResult<Kstat> {
         let metadata = self.inner.metadata()?;
         let rdev = self.inner.user_data().get::<DeviceId>().map(|d| *d).unwrap_or(metadata.rdev);
-        Ok(metadata_to_kstat_with_rdev(&metadata, rdev, Some(&self.inner)))
+        let mut kstat = metadata_to_kstat_with_rdev(&metadata, rdev, Some(&self.inner));
+        kstat.attributes = get_inode_flags(&self.inner);
+        Ok(kstat)
     }
 
     fn path(&self) -> Cow<'_, str> {

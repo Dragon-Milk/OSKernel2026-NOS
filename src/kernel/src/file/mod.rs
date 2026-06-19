@@ -23,7 +23,7 @@ use axpoll::Pollable;
 use axtask::current;
 use downcast_rs::{DowncastSync, impl_downcast};
 use flatten_objects::FlattenObjects;
-use linux_raw_sys::general::{O_NONBLOCK, RLIMIT_NOFILE, stat, statx, statx_timestamp};
+use linux_raw_sys::general::{O_NONBLOCK, RLIMIT_NOFILE, STATX_BASIC_STATS, stat, statx, statx_timestamp};
 use spin::RwLock;
 
 pub use self::{
@@ -35,7 +35,7 @@ pub use self::{
     },
     net::Socket,
     pidfd::PidFd,
-    pipe::{NamedPipe, Pipe},
+    pipe::{NamedPipe, Pipe, PIPE_MAX_SIZE},
     record_lock::FileOwnerEx,
     xattr::{
         XATTR_CREATE, XATTR_REPLACE,
@@ -64,9 +64,11 @@ pub const FS_IOC_SETFLAGS: u32 = 0x40086602;
 pub const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
 /// Inode flag: append-only (writes only allowed at end-of-file).
 pub const FS_APPEND_FL: u32 = 0x0000_0020;
+/// Inode flag: nodump (exclude from backups).
+pub const FS_NODUMP_FL: u32 = 0x0000_0040;
 
-/// Allowed settable flags: only IMMUTABLE and APPEND for now.
-const SETTABLE_FLAGS: u32 = FS_IMMUTABLE_FL | FS_APPEND_FL;
+/// Allowed settable flags.
+const SETTABLE_FLAGS: u32 = FS_IMMUTABLE_FL | FS_APPEND_FL | FS_NODUMP_FL;
 
 type InodeFlagsKey = (u64, u64);
 
@@ -137,6 +139,7 @@ pub struct Kstat {
     pub blksize: u32,
     pub blocks: u64,
     pub rdev: DeviceId,
+    pub attributes: u32,
     pub atime: Duration,
     pub mtime: Duration,
     pub ctime: Duration,
@@ -155,6 +158,7 @@ impl Default for Kstat {
             blksize: 4096,
             blocks: 0,
             rdev: DeviceId::default(),
+            attributes: 0,
             atime: Duration::default(),
             mtime: Duration::default(),
             ctime: Duration::default(),
@@ -192,8 +196,11 @@ impl From<Kstat> for statx {
     fn from(value: Kstat) -> Self {
         // SAFETY: valid for statx
         let mut statx: statx = unsafe { core::mem::zeroed() };
+        statx.stx_mask = STATX_BASIC_STATS;
         statx.stx_blksize = value.blksize as _;
-        statx.stx_attributes = value.mode as _;
+        statx.stx_attributes = value.attributes as u64;
+        statx.stx_attributes_mask =
+            (FS_IMMUTABLE_FL | FS_APPEND_FL | FS_NODUMP_FL) as u64;
         statx.stx_nlink = value.nlink as _;
         statx.stx_uid = value.uid as _;
         statx.stx_gid = value.gid as _;
@@ -212,6 +219,7 @@ impl From<Kstat> for statx {
             }
         }
         statx.stx_atime = time_to_statx(&value.atime);
+        statx.stx_btime = statx_timestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 };
         statx.stx_ctime = time_to_statx(&value.ctime);
         statx.stx_mtime = time_to_statx(&value.mtime);
 

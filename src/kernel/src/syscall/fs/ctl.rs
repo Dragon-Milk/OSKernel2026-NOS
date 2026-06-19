@@ -404,36 +404,7 @@ pub fn sys_unlinkat(dirfd: i32, path: *const c_char, flags: usize) -> AxResult<i
             check_sticky_removal(&parent, &entry, credentials)?;
             match fs.remove_dir(path.as_str()) {
                 Ok(()) => {}
-                Err(e) => {
-                    // Diagnostic: rmdir() failure on LTP tmpdirs may explain
-                    // why cleanup cannot recursively remove the test tree.
-                    if path.contains("LTP_") {
-                        let parent_meta = parent.metadata();
-                        let entry_meta = entry.metadata();
-                        // List remaining entries to see if the directory is
-                        // actually empty.
-                        let mut entry_names: alloc::vec::Vec<alloc::string::String> = alloc::vec![];
-                        if let Ok(inner_dir) = entry.entry().as_dir() {
-                            let _ = inner_dir.read_dir(0, &mut |n: &str, _, _, _| {
-                                if entry_names.len() < 10 {
-                                    entry_names.push(n.into());
-                                }
-                                entry_names.len() < 10
-                            });
-                        }
-                        warn!(
-                            "RMDIR_FAIL: path={path} errno={e:?} \
-                             parent_dev={} parent_ino={} \
-                             target_dev={} target_ino={} \
-                             entries={entry_names:?}",
-                            parent_meta.as_ref().map(|m| m.device).unwrap_or(0),
-                            parent_meta.as_ref().map(|m| m.inode).unwrap_or(0),
-                            entry_meta.as_ref().map(|m| m.device).unwrap_or(0),
-                            entry_meta.as_ref().map(|m| m.inode).unwrap_or(0),
-                        );
-                    }
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             }
             mark_directory_deleted(&entry);
             // Directories cannot be hard-linked; always clean up inode-level
@@ -467,42 +438,7 @@ pub fn sys_unlinkat(dirfd: i32, path: *const c_char, flags: usize) -> AxResult<i
             let last_link = entry.metadata().map(|m| m.nlink).unwrap_or(0) <= 1;
             match fs.remove_file(path.as_str()) {
                 Ok(()) => {}
-                Err(e) => {
-                    // Diagnostic: if unlink() hits a directory, log why the
-                    // cleanup tool might be confused about the entry type.
-                    if e == AxError::IsADirectory && path.contains("LTP_") {
-                        let parent_meta = parent.metadata();
-                        let entry_meta = entry.metadata();
-                        let entry_node_type = entry.node_type();
-                        let entry_nlink = entry_meta.as_ref().map(|m| m.nlink).unwrap_or(0);
-                        let entry_deleted = is_directory_deleted(&entry);
-                        // Try to list first few directory entries for debugging.
-                        let mut entry_names: alloc::vec::Vec<alloc::string::String> = alloc::vec![];
-                        if entry.is_dir() {
-                            if let Ok(inner_dir) = entry.entry().as_dir() {
-                                let _ = inner_dir.read_dir(0, &mut |n: &str, _, _, _| {
-                                    if entry_names.len() < 10 {
-                                        entry_names.push(n.into());
-                                    }
-                                    entry_names.len() < 10
-                                });
-                            }
-                        }
-                        warn!(
-                            "UNLINK_DIR_EISDIR: path={path} \
-                             parent_dev={} parent_ino={} \
-                             target_dev={} target_ino={} \
-                             target_node_type={entry_node_type:?} target_nlink={entry_nlink} \
-                             target_deleted={entry_deleted} \
-                             entries={entry_names:?}",
-                            parent_meta.as_ref().map(|m| m.device).unwrap_or(0),
-                            parent_meta.as_ref().map(|m| m.inode).unwrap_or(0),
-                            entry_meta.as_ref().map(|m| m.device).unwrap_or(0),
-                            entry_meta.as_ref().map(|m| m.inode).unwrap_or(0),
-                        );
-                    }
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             }
             if last_link {
                 remove_xattr_map(&entry);
@@ -535,65 +471,6 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> AxResult<isize> {
         (path, meta.device, meta.inode, cur.node_type(), deleted)
     };
 
-    // Phase 2: resolve the constructed path and compare inode/device.
-    // This is DIAGNOSTIC ONLY — we never return ENOENT from the comparison.
-    // glibc getcwd() performs its own stat cross-check and will fall back
-    // if the returned path does not stat back to the same directory.
-    let starts_with_slash = cwd_path.as_str().starts_with('/');
-    let (resolve_result, resolved_dev, resolved_ino) = {
-        let fs = FS_CONTEXT.lock();
-        match fs.resolve(cwd_path.as_str()) {
-            Ok(loc) => match loc.metadata() {
-                Ok(m) => (Ok(()), m.device, m.inode),
-                Err(_) => (Err(AxError::NotFound), 0, 0),
-            },
-            Err(e) => (Err(e), 0, 0),
-        }
-    };
-    let inode_matches = resolve_result.is_ok()
-        && resolved_dev == cwd_device
-        && resolved_ino == cwd_inode;
-
-    // Collect parent chain for diagnostics.
-    let (parent_chain_names, parent_chain_inodes) = {
-        let fs = FS_CONTEXT.lock();
-        let cur = fs.current_dir();
-        let mut names: alloc::vec::Vec<alloc::string::String> = alloc::vec![];
-        let mut inodes: alloc::vec::Vec<u64> = alloc::vec![];
-        let mut node = cur.clone();
-        loop {
-            let entry = node.entry();
-            names.push(entry.name().into());
-            inodes.push(entry.inode());
-            node = match node.parent() {
-                Some(p) => p,
-                None => break,
-            };
-        }
-        (names, inodes)
-    };
-
-    // Diagnostic: always emit at warn! level when the cwd is under /tmp/
-    // so we can see the actual path and inode chain glibc will cross-check.
-    let is_ltp = cwd_path.as_str().contains("LTP_") || cwd_path.as_str().starts_with("/tmp/");
-    if is_ltp || !inode_matches {
-        let mp_id = {
-            let fs = FS_CONTEXT.lock();
-            let cur = fs.current_dir();
-            alloc::format!("{:?}", cur.mountpoint().device())
-        };
-        warn!(
-            "GETCWD_FAIL: cwd_device={cwd_device} cwd_inode={cwd_inode} \
-             cwd_node_type={cwd_node_type:?} cwd_deleted={cwd_deleted} \
-             absolute_path={cwd_path} starts_with_slash={starts_with_slash} \
-             resolve_result={resolve_result:?} resolved_device={resolved_dev} \
-             resolved_inode={resolved_ino} inode_matches={inode_matches} \
-             parent_chain_names={parent_chain_names:?} \
-             parent_chain_inodes={parent_chain_inodes:?} \
-             mountpoint_device={mp_id}"
-        );
-    }
-
     let cwd = CString::new(cwd_path.as_str()).map_err(|_| AxError::InvalidInput)?;
     let cwd = cwd.as_bytes_with_nul();
     // copied_len includes the NUL terminator (Linux ABI).
@@ -604,15 +481,6 @@ pub fn sys_getcwd(buf: *mut u8, size: usize) -> AxResult<isize> {
     }
 
     vm_write_slice(buf, cwd)?;
-
-    // Diagnostic: log the return value for LTP paths so we can confirm
-    // glibc sees retval > 0 and path[0] == '/'.
-    if is_ltp {
-        warn!(
-            "GETCWD_RET: path={cwd_path} copied_len={copied_len} ret={copied_len} \
-             buf={buf:?} size={size}"
-        );
-    }
 
     // Linux getcwd(2) returns the number of bytes copied to the user
     // buffer, including the NUL terminator. glibc's getcwd() checks that
@@ -708,6 +576,7 @@ pub fn sys_lchown(path: *const c_char, uid: i32, gid: i32) -> AxResult<isize> {
 }
 
 pub fn sys_fchown(fd: i32, uid: i32, gid: i32) -> AxResult<isize> {
+    check_not_o_path_fd(fd)?;
     sys_fchownat(fd, core::ptr::null(), uid, gid, AT_EMPTY_PATH)
 }
 
@@ -728,9 +597,15 @@ pub fn sys_fchownat(
     let credentials = VfsCredentials::effective();
     if let Some(path) = path.as_deref() {
         if !path.is_empty() {
+            if path_refers_to_o_path_fd(path) {
+                return Err(AxError::BadFileDescriptor);
+            }
             check_path_len(path)?;
             with_fs_at(dirfd, path, |fs| check_path_search(fs, path, credentials))?;
         }
+    }
+    if flags & AT_EMPTY_PATH != 0 && path.as_deref().map_or(true, |p| p.is_empty()) {
+        check_not_o_path_fd(dirfd)?;
     }
     let loc = resolve_at(dirfd, path.as_deref(), flags)?
         .into_file()
@@ -772,6 +647,7 @@ pub fn sys_chmod(path: *const c_char, mode: u32) -> AxResult<isize> {
 }
 
 pub fn sys_fchmod(fd: i32, mode: u32) -> AxResult<isize> {
+    check_not_o_path_fd(fd)?;
     sys_fchmodat(fd, core::ptr::null(), mode, AT_EMPTY_PATH)
 }
 
@@ -786,9 +662,15 @@ pub fn sys_fchmodat(dirfd: i32, path: *const c_char, mode: u32, flags: u32) -> A
     let credentials = VfsCredentials::effective();
     if let Some(path) = path.as_deref() {
         if !path.is_empty() {
+            if path_refers_to_o_path_fd(path) {
+                return Err(AxError::BadFileDescriptor);
+            }
             check_path_len(path)?;
             with_fs_at(dirfd, path, |fs| check_path_search(fs, path, credentials))?;
         }
+    }
+    if flags & AT_EMPTY_PATH != 0 && path.as_deref().map_or(true, |p| p.is_empty()) {
+        check_not_o_path_fd(dirfd)?;
     }
     let loc = resolve_at(dirfd, path.as_deref(), flags)?
         .into_file()
@@ -977,6 +859,23 @@ pub fn sys_renameat2(
     check_path_len(&old_path)?;
     check_path_len(&new_path)?;
 
+    // Validate flags.
+    // RENAME_WHITEOUT is unsupported.
+    // RENAME_NOREPLACE and RENAME_EXCHANGE are mutually exclusive.
+    const SUPPORTED_FLAGS: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE;
+    if flags & RENAME_WHITEOUT != 0 {
+        return Err(AxError::InvalidInput);
+    }
+    if flags & !(SUPPORTED_FLAGS | RENAME_WHITEOUT) != 0 {
+        return Err(AxError::InvalidInput);
+    }
+    if flags & SUPPORTED_FLAGS == SUPPORTED_FLAGS {
+        // NOREPLACE | EXCHANGE together is EINVAL (LTP case 4)
+        return Err(AxError::InvalidInput);
+    }
+
+    let is_exchange = flags & RENAME_EXCHANGE != 0;
+
     let (old_dir, old_name, old) = with_fs_at(old_dirfd, &old_path, |fs| {
         let (old_dir, old_name) = fs.resolve_parent(Path::new(&old_path))?;
         let old = old_dir.lookup_no_follow(&old_name)?;
@@ -995,14 +894,27 @@ pub fn sys_renameat2(
     if !old_dir.same_mountpoint(&new_dir) {
         return Err(AxError::CrossesDevices);
     }
-    if let Some(new) = new.as_ref()
-        && old.same_mountpoint(new)
-        && old.inode() == new.inode()
-    {
-        return Ok(0);
+
+    // RENAME_EXCHANGE requires both paths to exist.
+    if is_exchange && new.is_none() {
+        return Err(AxError::NotFound);
     }
 
-    check_rename_type(&old, new.as_ref())?;
+    // Handle same-inode no-op and RENAME_NOREPLACE target-exists check
+    if let Some(new) = new.as_ref() {
+        if old.same_mountpoint(new) && old.inode() == new.inode() {
+            return Ok(0);
+        }
+        if !is_exchange && flags & RENAME_NOREPLACE != 0 {
+            return Err(AxError::AlreadyExists);
+        }
+    }
+
+    // Type checks: for exchange Linux allows different types, so skip.
+    if !is_exchange {
+        check_rename_type(&old, new.as_ref())?;
+    }
+
     check_writable_filesystem(&old_dir)?;
     check_writable_filesystem(&new_dir)?;
 
@@ -1020,7 +932,11 @@ pub fn sys_renameat2(
         check_sticky_removal(&new_dir, new, credentials)?;
     }
 
-    old_dir.rename(&old_name, &new_dir, &new_name)?;
+    if is_exchange {
+        old_dir.exchange(&old_name, &new_dir, &new_name)?;
+    } else {
+        old_dir.rename(&old_name, &new_dir, &new_name)?;
+    }
     Ok(0)
 }
 
@@ -1071,6 +987,9 @@ fn resolve_xattr_target(
 fn resolve_xattr_fd(fd: i32) -> AxResult<Option<Location>> {
     debug!("resolve_xattr_fd: fd={fd}");
     let file_like = get_file_like(fd)?;
+    if is_o_path_fd(file_like.as_ref()) {
+        return Err(AxError::BadFileDescriptor);
+    }
     if let Some(file) = file_like.downcast_ref::<File>() {
         Ok(Some(file.inner().location().clone()))
     } else if let Some(dir) = file_like.downcast_ref::<Directory>() {
@@ -1082,6 +1001,55 @@ fn resolve_xattr_fd(fd: i32) -> AxResult<Option<Location>> {
         Ok(None)
     } else {
         Err(AxError::BadFileDescriptor)
+    }
+}
+
+fn is_o_path_fd(file_like: &dyn FileLike) -> bool {
+    file_like.access_mode() & O_PATH != 0
+}
+
+fn check_not_o_path_fd(fd: i32) -> AxResult<()> {
+    let file_like = get_file_like(fd)?;
+    if is_o_path_fd(file_like.as_ref()) {
+        Err(AxError::BadFileDescriptor)
+    } else {
+        Ok(())
+    }
+}
+
+fn path_refers_to_o_path_fd(path: &str) -> bool {
+    let Some(fd) = proc_fd_path_fd(path) else {
+        return false;
+    };
+    get_file_like(fd as _)
+        .map(|file_like| is_o_path_fd(file_like.as_ref()))
+        .unwrap_or(false)
+}
+
+fn proc_fd_path_fd(path: &str) -> Option<u32> {
+    if let Some(fd) = path.strip_prefix("/proc/self/fd/") {
+        return parse_proc_fd_tail(fd);
+    }
+
+    let rest = path.strip_prefix("/proc/")?;
+    let (pid, fd) = rest.split_once("/fd/")?;
+    let pid = pid.parse::<u64>().ok()?;
+    let curr = current();
+    let thread = curr.as_thread();
+    let current_pid = u64::from(thread.proc_data.proc.pid());
+    let current_tid = curr.id().as_u64();
+    if pid == current_pid || pid == current_tid {
+        parse_proc_fd_tail(fd)
+    } else {
+        None
+    }
+}
+
+fn parse_proc_fd_tail(fd: &str) -> Option<u32> {
+    if fd.is_empty() || fd.contains('/') {
+        None
+    } else {
+        fd.parse().ok()
     }
 }
 

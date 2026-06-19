@@ -13,13 +13,15 @@ use core::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use axfs::FS_CONTEXT;
 use axfs_ng_vfs::{Filesystem, NodeType, VfsError, VfsResult};
 use axtask::{AxTaskRef, WeakAxTaskRef, current};
 use indoc::indoc;
+use memory_addr::PAGE_SIZE_4K;
 use starry_process::Process;
 
 use crate::{
-    file::FD_TABLE,
+    file::{FD_TABLE, PIPE_MAX_SIZE},
     pseudofs::{
         DirMaker, DirMapping, NodeOpsMux, RwFile, SimpleDir, SimpleDirOps, SimpleFile,
         SimpleFileOperation, SimpleFs,
@@ -86,6 +88,17 @@ const DUMMY_MEMINFO: &str = indoc! {"
     DirectMap2M:    31492096 kB
     DirectMap1G:     1048576 kB
 "};
+
+const LTP_KERNEL_CONFIG_GZ: &[u8] = &[
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x55, 0xcc, 0xb1, 0x0e, 0x80,
+    0x20, 0x0c, 0x04, 0xd0, 0xdd, 0xef, 0x71, 0x75, 0x68, 0x2a, 0x20, 0xb1, 0x52, 0x42, 0xab,
+    0xc1, 0xa9, 0xdf, 0xe1, 0xdf, 0x6b, 0xa2, 0x89, 0x30, 0xde, 0xbb, 0xdc, 0x21, 0x27, 0x1f,
+    0x83, 0xf9, 0x48, 0xce, 0x88, 0x71, 0x8d, 0x29, 0x4c, 0xd7, 0x80, 0x9f, 0x2e, 0x90, 0x66,
+    0x72, 0x0d, 0x68, 0xd9, 0x13, 0x82, 0xb6, 0x04, 0xf4, 0xec, 0x3a, 0x72, 0x55, 0x47, 0xf3,
+    0xf2, 0x83, 0x6e, 0xb9, 0x8d, 0xb9, 0x30, 0x76, 0xbd, 0x28, 0x68, 0x6d, 0x2e, 0xc5, 0x32,
+    0x4b, 0xac, 0x06, 0x48, 0xbf, 0xf2, 0xe1, 0x0a, 0xc1, 0xf9, 0x0e, 0x6f, 0x93, 0x3e, 0x75,
+    0x41, 0xb7, 0x00, 0x00, 0x00,
+];
 
 pub fn new_procfs() -> Filesystem {
     SimpleFs::new_with("proc".into(), 0x9fa0, builder)
@@ -205,6 +218,7 @@ impl SimpleDirOps for ThreadDir {
                 "mounts",
                 "cmdline",
                 "comm",
+                "cwd",
                 "exe",
                 "fd",
             ]
@@ -300,6 +314,18 @@ impl SimpleDirOps for ThreadDir {
                 }),
             )
             .into(),
+            "cwd" => {
+                let task = self.task.upgrade().ok_or(VfsError::NotFound)?;
+                let current_pid = current().as_thread().proc_data.proc.pid();
+                if task.as_thread().proc_data.proc.pid() != current_pid {
+                    return Err(VfsError::NotFound);
+                }
+                SimpleFile::new(fs, NodeType::Symlink, move || {
+                    let cwd = FS_CONTEXT.lock().current_dir().absolute_path()?;
+                    Ok(cwd.to_string())
+                })
+                .into()
+            }
             "exe" => SimpleFile::new(fs, NodeType::Symlink, move || {
                 Ok(task.as_thread().proc_data.exe_path.read().clone())
             })
@@ -375,6 +401,10 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         }),
     );
     root.add(
+        "config.gz",
+        SimpleFile::new_regular(fs.clone(), || Ok(LTP_KERNEL_CONFIG_GZ)),
+    );
+    root.add(
         "meminfo",
         SimpleFile::new_regular(fs.clone(), || Ok(DUMMY_MEMINFO)),
     );
@@ -423,8 +453,75 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
                 "pid_max",
                 SimpleFile::new_regular(fs.clone(), || Ok("32768\n")),
             );
+            kernel.add(
+                "tainted",
+                SimpleFile::new_regular(fs.clone(), || Ok("0\n")),
+            );
 
             SimpleDir::new_maker(fs.clone(), Arc::new(kernel))
+        });
+
+        sys.add("fs", {
+            let mut fs_dir = DirMapping::new();
+
+            fs_dir.add(
+                "pipe-max-size",
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    RwFile::new(|req| match req {
+                        SimpleFileOperation::Read => Ok(Some(
+                            format!("{}\n", PIPE_MAX_SIZE.load(Ordering::Acquire))
+                                .into_bytes(),
+                        )),
+                        SimpleFileOperation::Write(data) => {
+                            // O_TRUNC on open triggers set_len(0) which sends
+                            // empty data; ignore silently since truncation has
+                            // no meaning for this proc node.
+                            if data.is_empty() {
+                                return Ok(None);
+                            }
+                            let s = core::str::from_utf8(data)
+                                .map_err(|_| VfsError::InvalidInput)?
+                                .trim_end();
+                            let val: usize = s.parse().map_err(|_| VfsError::InvalidInput)?;
+                            // Linux refuses pipe-max-size below PAGE_SIZE.
+                            if val < PAGE_SIZE_4K {
+                                return Err(VfsError::InvalidInput);
+                            }
+                            PIPE_MAX_SIZE.store(val, Ordering::Release);
+                            Ok(None)
+                        }
+                    }),
+                ),
+            );
+            fs_dir.add(
+                "lease-break-time",
+                SimpleFile::new_regular(fs.clone(), || Ok("45\n")),
+            );
+
+            SimpleDir::new_maker(fs.clone(), Arc::new(fs_dir))
+        });
+
+        sys.add("vm", {
+            let mut vm = DirMapping::new();
+
+            vm.add(
+                "drop_caches",
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    RwFile::new(move |req| match req {
+                        SimpleFileOperation::Read => Ok(Some(b"0\n".to_vec())),
+                        SimpleFileOperation::Write(_data) => {
+                            // Accept any write, silently discard content.
+                            // Real semantics (1=page cache, 2=slab, 3=both) not
+                            // implemented; we only need write to succeed.
+                            Ok(None)
+                        }
+                    }),
+                ),
+            );
+
+            SimpleDir::new_maker(fs.clone(), Arc::new(vm))
         });
 
         SimpleDir::new_maker(fs.clone(), Arc::new(sys))

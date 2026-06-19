@@ -2,7 +2,8 @@
 
 export HOME=/root
 export USER=root
-export PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
+BASE_PATH=.:/bin:/sbin:/usr/bin:/usr/sbin
+export PATH=$BASE_PATH
 
 # Set SKIP_LTP=0 to run the original ltp_testcode.sh scripts again.
 # ============================================================
@@ -166,9 +167,21 @@ skip_ltp_testcase() {
 
 set_library_path() {
     case "$1" in
-        /glibc|/glibc/*) export LD_LIBRARY_PATH=/glibc/lib ;;
-        /musl|/musl/*) export LD_LIBRARY_PATH=/musl/lib ;;
-        *) unset LD_LIBRARY_PATH ;;
+        /glibc|/glibc/*)
+            export PATH=.:/glibc/ltp/testcases/bin:/bin:/sbin:/usr/bin:/usr/sbin
+            export LD_LIBRARY_PATH=/glibc/lib:/glibc/lib64:/lib:/lib64:/usr/lib:/usr/lib64
+            export LTPROOT=/glibc/ltp
+            ;;
+        /musl|/musl/*)
+            export PATH=.:/musl/ltp/testcases/bin:/bin:/sbin:/usr/bin:/usr/sbin
+            export LD_LIBRARY_PATH=/musl/lib:/musl/lib64:/lib:/lib64:/usr/lib:/usr/lib64
+            export LTPROOT=/musl/ltp
+            ;;
+        *)
+            export PATH=$BASE_PATH
+            unset LD_LIBRARY_PATH
+            unset LTPROOT
+            ;;
     esac
 }
 

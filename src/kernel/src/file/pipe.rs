@@ -39,6 +39,10 @@ use crate::{
 };
 
 const RING_BUFFER_INIT_SIZE: usize = 65536; // 64 KiB
+
+/// Maximum pipe capacity for unprivileged users (1 MiB).
+/// Exposed at /proc/sys/fs/pipe-max-size — writable via procfs.
+pub static PIPE_MAX_SIZE: AtomicUsize = AtomicUsize::new(1048576);
 type FifoKey = (u64, u64);
 
 static NAMED_PIPES: Lazy<SpinMutex<BTreeMap<FifoKey, Weak<Shared>>>> =
@@ -60,8 +64,23 @@ struct Shared {
 
 impl Shared {
     fn new() -> Arc<Self> {
+        // Default pipe capacity is 64 KiB.  If the admin has lowered
+        // /proc/sys/fs/pipe-max-size below that, unprivileged callers get
+        // the smaller limit; privileged (root) callers still get 64 KiB.
+        // Use the current process's effective uid directly rather than going
+        // through VfsCredentials, to stay in sync with setuid/seteuid/setresuid.
+        let init_size = {
+            let max = PIPE_MAX_SIZE.load(Ordering::Acquire);
+            if max < RING_BUFFER_INIT_SIZE
+                && current().as_thread().proc_data.credentials().effective_uid != 0
+            {
+                max
+            } else {
+                RING_BUFFER_INIT_SIZE
+            }
+        };
         Arc::new(Self {
-            buffer: Mutex::new(HeapRb::new(RING_BUFFER_INIT_SIZE)),
+            buffer: Mutex::new(HeapRb::new(init_size)),
             poll_rx: PollSet::new(),
             poll_tx: PollSet::new(),
             poll_close: PollSet::new(),
@@ -191,7 +210,21 @@ impl Pipe {
     }
 
     pub fn resize(&self, new_size: usize) -> AxResult<()> {
+        // Refuse zero-sized pipes.
+        if new_size == 0 {
+            return Err(AxError::InvalidInput);
+        }
+        // Refuse sizes that would overflow isize (Vec::with_capacity limit).
+        if new_size > isize::MAX as usize {
+            return Err(AxError::InvalidInput);
+        }
+
         let new_size = new_size.div_ceil(PAGE_SIZE_4K).max(1) * PAGE_SIZE_4K;
+
+        // Double-check after rounding: must still be allocatable.
+        if new_size > isize::MAX as usize {
+            return Err(AxError::InvalidInput);
+        }
 
         let mut buffer = self.shared.buffer.lock();
         if new_size == buffer.capacity().get() {

@@ -129,11 +129,14 @@ impl FileNodeOps for SimpleFile {
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> VfsResult<usize> {
-        let data = self.ops.read_all()?;
-        if offset == 0 && buf.len() >= data.len() {
+        // Writing at offset 0 replaces the entire content — the correct
+        // semantics for pseudo-filesystems where Read regenerates content
+        // dynamically and partial overwrite would corrupt payloads.
+        if offset == 0 {
             self.ops.write_all(buf)?;
             return Ok(buf.len());
         }
+        let data = self.ops.read_all()?;
         let mut data = data.to_vec();
         let end_pos = offset + buf.len() as u64;
         if end_pos > data.len() as u64 {

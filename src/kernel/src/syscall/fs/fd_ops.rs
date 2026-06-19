@@ -20,7 +20,7 @@ use spin::RwLock;
 use crate::{
     file::{
         AccessMode, Directory, FD_TABLE, File, FileLike, FileOwnerEx, NamedPipe, Pipe,
-        VfsCredentials, add_file_like, add_file_like_from,
+        PIPE_MAX_SIZE, VfsCredentials, add_file_like, add_file_like_from,
         check_not_append_only, check_not_immutable,
         check_parent_permission, check_path_search, check_permission,
         check_writable_filesystem, close_file_like, creation_metadata, get_file_like,
@@ -807,6 +807,20 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> AxResult<isize> {
         }
         F_SETPIPE_SZ => {
             let pipe = Pipe::from_fd(fd)?;
+            // Linux error ordering:
+            // 1. arg == 0       -> EINVAL
+            // 2. arg > INT_MAX  -> EINVAL
+            // 3. arg > max size -> EPERM
+            // 4. < occupied     -> EBUSY (from resize)
+            if arg == 0 {
+                return Err(AxError::InvalidInput);
+            }
+            if arg > i32::MAX as usize {
+                return Err(AxError::InvalidInput);
+            }
+            if arg > PIPE_MAX_SIZE.load(Ordering::Acquire) {
+                return Err(AxError::OperationNotPermitted);
+            }
             pipe.resize(arg)?;
             Ok(0)
         }

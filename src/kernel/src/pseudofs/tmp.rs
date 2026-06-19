@@ -71,7 +71,7 @@ impl MemoryFs {
             &fs,
             None,
             NodeType::Directory,
-            NodePermission::from_bits_truncate(0o755),
+            NodePermission::from_bits_truncate(0o1777),
         );
         *fs.root.lock() = Some(DirEntry::new_dir(
             |this| DirNode::new(MemoryNode::new(fs.clone(), root_ino, Some(this))),
@@ -461,6 +461,50 @@ impl DirNodeOps for MemoryNode {
             .entries
             .lock()
             .insert(dst_name.into(), src_entry);
+        Ok(())
+    }
+
+    fn exchange(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
+        let dst_node = dst_dir.downcast::<Self>()?;
+
+        // Both entries must exist.
+        let src_ino = self.lookup(src_name)?.inode();
+        let dst_ino = dst_dir.lookup(dst_name)?.inode();
+
+        // Same inode in the same directory is a no-op.
+        if Arc::ptr_eq(&self.inode, &dst_node.inode) && src_ino == dst_ino {
+            return Ok(());
+        }
+
+        let same_dir = Arc::ptr_eq(&self.inode, &dst_node.inode);
+
+        if same_dir {
+            let mut entries = self.inode.as_dir()?.entries.lock();
+            let src_ref = entries.remove(src_name).ok_or(VfsError::NotFound)?;
+            let dst_ref = entries.remove(dst_name).ok_or(VfsError::NotFound)?;
+            entries.insert(dst_name.into(), src_ref);
+            entries.insert(src_name.into(), dst_ref);
+        } else {
+            // Lock in inode order to avoid deadlock, then swap.
+            if self.inode.ino < dst_node.inode.ino {
+                let mut src_entries = self.inode.as_dir()?.entries.lock();
+                let mut dst_entries = dst_node.inode.as_dir()?.entries.lock();
+                let src_ref = src_entries.remove(src_name).ok_or(VfsError::NotFound)?;
+                let dst_ref = dst_entries.remove(dst_name).ok_or(VfsError::NotFound)?;
+                // src_ref → dst_dir as dst_name; dst_ref → src_dir as src_name
+                dst_entries.insert(dst_name.into(), src_ref);
+                src_entries.insert(src_name.into(), dst_ref);
+            } else {
+                let mut dst_entries = dst_node.inode.as_dir()?.entries.lock();
+                let mut src_entries = self.inode.as_dir()?.entries.lock();
+                let dst_ref = dst_entries.remove(dst_name).ok_or(VfsError::NotFound)?;
+                let src_ref = src_entries.remove(src_name).ok_or(VfsError::NotFound)?;
+                // src_ref → dst_dir as dst_name; dst_ref → src_dir as src_name
+                dst_entries.insert(dst_name.into(), src_ref);
+                src_entries.insert(src_name.into(), dst_ref);
+            }
+        }
+
         Ok(())
     }
 }

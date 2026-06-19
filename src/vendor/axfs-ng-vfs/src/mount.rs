@@ -256,6 +256,18 @@ impl Location {
             .rename(src_name, dst_dir.entry.as_dir()?, dst_name)
     }
 
+    /// Atomically exchanges two directory entries.
+    ///
+    /// Both entries must exist.
+    pub fn exchange(&self, src_name: &str, dst_dir: &Self, dst_name: &str) -> VfsResult<()> {
+        if !Arc::ptr_eq(&self.mountpoint, &dst_dir.mountpoint) {
+            return Err(VfsError::CrossesDevices);
+        }
+        self.entry
+            .as_dir()?
+            .exchange(src_name, dst_dir.entry.as_dir()?, dst_name)
+    }
+
     pub fn unlink(&self, name: &str, is_dir: bool) -> VfsResult<()> {
         self.entry.as_dir()?.unlink(name, is_dir)
     }

@@ -266,4 +266,11 @@ impl DirNodeOps for Inode {
         fs.rename(self.ino, src_name, dst_dir.ino, dst_name)
             .map_err(into_vfs_err)
     }
+
+    fn exchange(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()> {
+        let dst_dir: Arc<Self> = dst_dir.downcast().map_err(|_| VfsError::InvalidInput)?;
+        let mut fs = self.fs.lock();
+        fs.exchange(self.ino, src_name, dst_dir.ino, dst_name)
+            .map_err(into_vfs_err)
+    }
 }
