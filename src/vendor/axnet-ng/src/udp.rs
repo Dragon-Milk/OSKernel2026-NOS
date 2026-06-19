@@ -4,7 +4,7 @@ use core::{
     task::Context,
 };
 
-use axerrno::{AxError, AxResult, ax_bail, ax_err_type};
+use axerrno::{AxError, AxResult, LinuxError, ax_bail, ax_err_type};
 use axio::prelude::*;
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
@@ -124,6 +124,13 @@ impl SocketOps for UdpSocket {
             ax_bail!(InvalidInput, "already bound");
         }
 
+        // Non-local address check: bind must target a local interface.
+        if !local_addr.ip().is_unspecified() && !local_addr.ip().is_loopback() {
+            if !get_service().iface.has_ip_addr(local_addr.ip()) {
+                return Err(AxError::from(LinuxError::EADDRNOTAVAIL));
+            }
+        }
+
         let local_endpoint = IpEndpoint::from(local_addr);
         let endpoint = IpListenEndpoint {
             addr: (!local_endpoint.addr.is_unspecified()).then_some(local_endpoint.addr),
@@ -167,6 +174,17 @@ impl SocketOps for UdpSocket {
     }
 
     fn send(&self, mut src: impl Read + IoBuf, options: SendOptions) -> AxResult<usize> {
+        // Max UDP payload: 65535 (max IP packet) - 20 (IPv4 header) - 8 (UDP header).
+        const MAX_UDP_PAYLOAD: usize = 65507;
+
+        // Check message size first: Linux checks EMSGSIZE before address
+        // validation in udp_sendmsg(), so oversized datagrams must be
+        // rejected with EMSGSIZE even when the destination address is
+        // unspecified (e.g. INADDR_ANY).
+        if src.remaining() > MAX_UDP_PAYLOAD {
+            return Err(AxError::from(LinuxError::EMSGSIZE));
+        }
+
         let (remote_addr, source_addr) = match options.to {
             Some(addr) => {
                 let addr = IpEndpoint::from(addr.into_ip()?);
@@ -185,6 +203,7 @@ impl SocketOps for UdpSocket {
                 0,
             )))?;
         }
+
         self.general.send_poller(self, || {
             poll_interfaces();
             self.with_smol_socket(|socket| {

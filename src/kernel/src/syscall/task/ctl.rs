@@ -83,11 +83,34 @@ pub fn sys_umask(mask: u32) -> AxResult<isize> {
     Ok(old as isize)
 }
 
-pub fn sys_setreuid(_ruid: u32, _euid: u32) -> AxResult<isize> {
+pub fn sys_setreuid(ruid: u32, euid: u32) -> AxResult<isize> {
+    debug!("sys_setreuid <= ruid: {ruid}, euid: {euid}");
+    // -1 (u32::MAX) means "don't change this value"
+    let curr = current();
+    let proc_data = &curr.as_thread().proc_data;
+    if ruid != u32::MAX {
+        proc_data.set_uid(ruid);
+    }
+    if euid != u32::MAX {
+        proc_data.set_euid(euid);
+    }
     Ok(0)
 }
 
-pub fn sys_setresuid(_ruid: u32, _euid: u32, _suid: u32) -> AxResult<isize> {
+pub fn sys_setresuid(ruid: u32, euid: u32, suid: u32) -> AxResult<isize> {
+    debug!("sys_setresuid <= ruid: {ruid}, euid: {euid}, suid: {suid}");
+    // -1 (u32::MAX) means "don't change this value"
+    // Saved uid (suid) is not tracked separately; we only update real/effective.
+    let curr = current();
+    let proc_data = &curr.as_thread().proc_data;
+    if ruid != u32::MAX {
+        proc_data.set_uid(ruid);
+    }
+    if euid != u32::MAX {
+        proc_data.set_euid(euid);
+    }
+    // suid (saved set-user-ID) is silently ignored
+    let _ = suid;
     Ok(0)
 }
 

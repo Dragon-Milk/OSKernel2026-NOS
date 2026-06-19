@@ -74,6 +74,17 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxResult
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
     debug!("sys_bind <= fd: {fd}, addr: {addr:?}");
 
+    // Privileged port check: non-root users cannot bind to ports 1-1023.
+    if let SocketAddrEx::Ip(ref ip_addr) = addr {
+        let port = ip_addr.port();
+        if port > 0 && port < 1024 {
+            let euid = current().as_thread().proc_data.euid();
+            if euid != 0 {
+                return Err(AxError::from(LinuxError::EACCES));
+            }
+        }
+    }
+
     Socket::from_fd(fd)?.bind(addr)?;
 
     Ok(0)

@@ -5,7 +5,7 @@ use core::{
     task::Context,
 };
 
-use axerrno::{AxError, AxResult, ax_bail, ax_err_type};
+use axerrno::{AxError, AxResult, LinuxError, ax_bail, ax_err_type};
 use axio::prelude::*;
 use axpoll::{IoEvents, PollSet, Pollable};
 use axsync::Mutex;
@@ -221,6 +221,14 @@ impl SocketOps for TcpSocket {
                 if local_addr.port() == 0 {
                     local_addr.set_port(get_ephemeral_port()?);
                 }
+
+                // Non-local address check: bind must target a local interface.
+                if !local_addr.ip().is_unspecified() && !local_addr.ip().is_loopback() {
+                    if !get_service().iface.has_ip_addr(local_addr.ip()) {
+                        return Err(AxError::from(LinuxError::EADDRNOTAVAIL));
+                    }
+                }
+
                 if !self.general.reuse_address() {
                     SOCKET_SET.bind_check(local_addr.ip().into(), local_addr.port())?;
                 }
@@ -248,7 +256,14 @@ impl SocketOps for TcpSocket {
     }
 
     fn connect(&self, remote_addr: SocketAddrEx) -> AxResult {
-        let remote_addr = remote_addr.into_ip()?;
+        let mut remote_addr = remote_addr.into_ip()?;
+
+        // Map 0.0.0.0 to localhost (Linux semantics: connect to INADDR_ANY
+        // actually connects to localhost).
+        if remote_addr.ip().is_unspecified() {
+            remote_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), remote_addr.port());
+        }
+
         self.state
             .lock(State::Idle)
             .map_err(|state| {
@@ -350,13 +365,24 @@ impl SocketOps for TcpSocket {
         })
     }
 
-    fn send(&self, mut src: impl Read, _options: SendOptions) -> AxResult<usize> {
+    fn send(&self, mut src: impl Read, options: SendOptions) -> AxResult<usize> {
         // SAFETY: `self.handle` should be initialized in a connected socket.
         self.general.send_poller(self, || {
             poll_interfaces();
             self.with_smol_socket(|socket| {
                 if !socket.is_active() {
-                    Err(AxError::NotConnected)
+                    // After shutdown(SHUT_WR), the socket is no longer active
+                    // but the fd may still be open. Linux returns EPIPE in
+                    // this case, not ENOTCONN.
+                    if self.state() == State::Closed {
+                        Err(ax_err_type!(BrokenPipe))
+                    } else if options.to.is_some() {
+                        // sendto/sendmsg on an unconnected TCP socket: EPIPE
+                        Err(ax_err_type!(BrokenPipe))
+                    } else {
+                        // send (no destination) on an unconnected TCP socket: ENOTCONN
+                        Err(AxError::NotConnected)
+                    }
                 } else if !socket.can_send() {
                     Err(AxError::WouldBlock)
                 } else {

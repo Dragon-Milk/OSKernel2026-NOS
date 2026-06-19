@@ -294,6 +294,15 @@ pub struct ProcessData {
     /// The default mask for file permissions.
     /// 文件权限默认掩码。
     umask: AtomicU32,
+
+    /// Real user ID.
+    uid: AtomicU32,
+    /// Effective user ID.
+    euid: AtomicU32,
+    /// Real group ID.
+    gid: AtomicU32,
+    /// Effective group ID.
+    egid: AtomicU32,
 }
 
 impl ProcessData {
@@ -328,6 +337,11 @@ impl ProcessData {
             futex_table: Arc::new(FutexTable::new()),
 
             umask: AtomicU32::new(0o022),
+
+            uid: AtomicU32::new(0),
+            euid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
+            egid: AtomicU32::new(0),
         })
     }
 
@@ -360,5 +374,45 @@ impl ProcessData {
     /// Set the umask and return the old value.
     pub fn replace_umask(&self, umask: u32) -> u32 {
         self.umask.swap(umask, Ordering::SeqCst)
+    }
+
+    /// Get the real user ID.
+    pub fn uid(&self) -> u32 {
+        self.uid.load(Ordering::SeqCst)
+    }
+
+    /// Set the real user ID.
+    pub fn set_uid(&self, uid: u32) {
+        self.uid.store(uid, Ordering::SeqCst);
+    }
+
+    /// Get the effective user ID.
+    pub fn euid(&self) -> u32 {
+        self.euid.load(Ordering::SeqCst)
+    }
+
+    /// Set the effective user ID.
+    pub fn set_euid(&self, euid: u32) {
+        self.euid.store(euid, Ordering::SeqCst);
+    }
+
+    /// Get the real group ID.
+    pub fn gid(&self) -> u32 {
+        self.gid.load(Ordering::SeqCst)
+    }
+
+    /// Set the real group ID.
+    pub fn set_gid(&self, gid: u32) {
+        self.gid.store(gid, Ordering::SeqCst);
+    }
+
+    /// Get the effective group ID.
+    pub fn egid(&self) -> u32 {
+        self.egid.load(Ordering::SeqCst)
+    }
+
+    /// Set the effective group ID.
+    pub fn set_egid(&self, egid: u32) {
+        self.egid.store(egid, Ordering::SeqCst);
     }
 }

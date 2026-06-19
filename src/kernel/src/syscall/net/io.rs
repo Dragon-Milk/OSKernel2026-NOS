@@ -1,19 +1,32 @@
 use alloc::{boxed::Box, vec::Vec};
 use core::net::Ipv4Addr;
 
-use axerrno::{AxError, AxResult};
+use axerrno::{AxError, AxResult, LinuxError};
 use axio::prelude::*;
 use axnet::{CMsgData, RecvFlags, RecvOptions, SendFlags, SendOptions, SocketAddrEx, SocketOps};
 use linux_raw_sys::net::{
-    MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET, cmsghdr, msghdr, sockaddr, socklen_t,
+    MSG_CONFIRM, MSG_DONTROUTE, MSG_DONTWAIT, MSG_EOR, MSG_ERRQUEUE, MSG_MORE,
+    MSG_NOSIGNAL, MSG_OOB, MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET, cmsghdr, msghdr,
+    sockaddr, socklen_t,
 };
 
 use super::addr::SocketAddrExt;
+use linux_raw_sys::general::UIO_MAXIOV;
+
 use crate::{
     file::{FileLike, Socket, add_file_like},
     mm::{IoVec, IoVectorBuf, UserConstPtr, UserPtr, VmBytes, VmBytesMut, check_access},
     syscall::net::{CMsg, CMsgBuilder},
 };
+
+/// Send flags supported by this implementation. Flags outside this set are
+/// rejected with `EOPNOTSUPP`.
+const VALID_SEND_FLAGS: u32 = MSG_DONTROUTE
+    | MSG_DONTWAIT
+    | MSG_EOR
+    | MSG_CONFIRM
+    | MSG_NOSIGNAL
+    | MSG_MORE;
 
 fn send_impl(
     fd: i32,
@@ -23,14 +36,26 @@ fn send_impl(
     addrlen: socklen_t,
     cmsg: Vec<CMsgData>,
 ) -> AxResult<isize> {
+    // Reject unsupported flags (Linux returns EOPNOTSUPP).
+    if flags & !VALID_SEND_FLAGS != 0 {
+        return Err(AxError::from(LinuxError::EOPNOTSUPP));
+    }
+
     // Validate fd first (EBADF/ENOTSOCK priority)
     let socket = Socket::from_fd(fd)?;
 
-    // Then resolve destination address
+    // Then resolve destination address.
+    // EAFNOSUPPORT (e.g. AF_UNSPEC) is treated as no destination so that
+    // connected sockets (TCP) can still send — the peer address is already
+    // known and the destination parameter is ignored.
     let addr = if addr.is_null() || addrlen == 0 {
         None
     } else {
-        Some(SocketAddrEx::read_from_user(addr, addrlen)?)
+        match SocketAddrEx::read_from_user(addr, addrlen) {
+            Ok(addr) => Some(addr),
+            Err(e) if e == AxError::from(LinuxError::EAFNOSUPPORT) => None,
+            Err(e) => return Err(e),
+        }
     };
 
     debug!("sys_send <= fd: {fd}, flags: {flags}, addr: {addr:?}");
@@ -98,6 +123,17 @@ fn recv_impl(
 ) -> AxResult<isize> {
     debug!("sys_recv <= fd: {fd}, flags: {flags}");
 
+    // MSG_OOB is only meaningful for stream sockets with out-of-band data;
+    // this implementation does not support OOB data.
+    if flags & MSG_OOB != 0 {
+        return Err(AxError::from(LinuxError::EINVAL));
+    }
+    // MSG_ERRQUEUE reads from the socket error queue, which is not
+    // implemented. Linux returns EAGAIN when the error queue is empty.
+    if flags & MSG_ERRQUEUE != 0 {
+        return Err(AxError::from(LinuxError::EAGAIN));
+    }
+
     let socket = Socket::from_fd(fd)?;
     let mut recv_flags = RecvFlags::empty();
     if flags & MSG_PEEK != 0 {
@@ -121,7 +157,13 @@ fn recv_impl(
     )?;
 
     if let Some(remote_addr) = remote_addr {
-        remote_addr.write_to_user(addr, addrlen.get_as_mut()?)?;
+        // Best-effort: ignore writeback failures.  For connected sockets the
+        // source address is already known and failing to write it back (e.g.
+        // because the caller passed an invalid `from` pointer) should not
+        // cause the entire recv call to fail.
+        if let Ok(alen) = addrlen.get_as_mut() {
+            let _ = remote_addr.write_to_user(addr, alen);
+        }
     }
 
     if let Some(mut builder) = cmsg_builder {
@@ -160,11 +202,40 @@ pub fn sys_recvfrom(
     addr: UserPtr<sockaddr>,
     addrlen: UserPtr<socklen_t>,
 ) -> AxResult<isize> {
+    // Validate addr/addrlen combination (mirrors Linux checks).
+    if !addrlen.is_null() {
+        let alen = *addrlen.get_as_mut()?;
+        // Linux treats addr_len as int; negative values → EINVAL.
+        if (alen as i32) < 0 {
+            return Err(AxError::from(LinuxError::EINVAL));
+        }
+        if addr.is_null() {
+            // Null addr with non-zero addrlen → EINVAL
+            if alen != 0 {
+                return Err(AxError::from(LinuxError::EINVAL));
+            }
+        } else if alen > 0 && alen < 2 {
+            // Non-null addr with too-small (but non-zero) addrlen → EINVAL
+            // (minimum sockaddr is 2 bytes: sa_family_t)
+            return Err(AxError::from(LinuxError::EINVAL));
+        }
+    }
     recv_impl(fd, VmBytesMut::new(buf, len), flags, addr, addrlen, None)
 }
 
 pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> AxResult<isize> {
     let msg = msg.get_as_mut()?;
+
+    // Validate iovec count (Linux returns EMSGSIZE when exceeding UIO_MAXIOV).
+    if msg.msg_iovlen > UIO_MAXIOV as usize {
+        return Err(AxError::from(LinuxError::EMSGSIZE));
+    }
+
+    // Validate namelen (mirrors the recvfrom check).
+    if (msg.msg_namelen as i32) < 0 {
+        return Err(AxError::from(LinuxError::EINVAL));
+    }
+
     recv_impl(
         fd,
         IoVectorBuf::new(msg.msg_iov as *mut IoVec, msg.msg_iovlen)?.into_io(),
