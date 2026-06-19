@@ -60,7 +60,13 @@ impl FileLike for Socket {
     where
         Self: Sized + 'static,
     {
-        get_file_like(fd)?
+        let file_like = get_file_like(fd)?;
+        // O_PATH files and dummy fds (open_tree etc.) are not valid for
+        // socket operations — Linux returns EBADF, not ENOTSOCK.
+        if !file_like.is_socket_operable() {
+            return Err(AxError::BadFileDescriptor);
+        }
+        file_like
             .downcast_arc()
             .map_err(|_| AxError::NotASocket)
     }

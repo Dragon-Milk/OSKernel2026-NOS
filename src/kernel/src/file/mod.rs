@@ -161,6 +161,13 @@ pub trait FileLike: Pollable + DowncastSync {
         Ok(())
     }
 
+    /// Returns `false` for fd types that cannot be used with socket operations
+    /// (e.g., O_PATH files, dummy fds from open_tree). In Linux these return
+    /// `EBADF` rather than `ENOTSOCK` because the fd is not valid for the operation.
+    fn is_socket_operable(&self) -> bool {
+        true
+    }
+
     fn from_fd(fd: c_int) -> AxResult<Arc<Self>>
     where
         Self: Sized + 'static,

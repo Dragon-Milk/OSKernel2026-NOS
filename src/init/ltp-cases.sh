@@ -1293,26 +1293,42 @@ ltp_batch_cases() {
                 string01
             do echo "$n"; done
             ;;
+        #net:01|net-core:01)
+        #    for n in \
+        #        accept01 \
+        #        accept02 \
+        #        accept03 \
+        #        accept4_01 \
+        #        bind01 \
+        #        bind02 \
+        #        bind03 \
+        #        bind04 \
+        #        bind05 \
+        #        bind06 \
+        #        connect01 \
+        #        connect02 \
+        #        getaddrinfo_01 \
+        #        gethostbyname_r01 \
+        #        getsockname01 \
+        #        getsockopt01 \
+        #        getsockopt02 \
+        #        listen01
+        #    do echo "$n"; done
+        #    ;;
         net:01|net-core:01)
             for n in \
-                accept01 \
-                accept02 \
-                accept03 \
-                accept4_01 \
-                bind01 \
-                bind02 \
-                bind03 \
-                bind04 \
-                bind05 \
-                bind06 \
-                connect01 \
-                connect02 \
-                getaddrinfo_01 \
-                gethostbyname_r01 \
-                getsockname01 \
-                getsockopt01 \
-                getsockopt02 \
-                listen01
+                get_ifname \
+                tcp4-uni-basic01 \
+                tcp4-uni-basic14 \
+                udp4-uni-basic01 \
+                udp4-uni-basic07 \
+                icmp-uni-basic.sh \
+                arping01.sh \
+                bbr01.sh \
+                broken_ip-plen.sh \
+                mcast-group-single-socket.sh \
+                route-change-if.sh \
+                tcp_ipsec.sh
             do echo "$n"; done
             ;;
         net:02|net-core:02)

@@ -23,6 +23,10 @@ impl FileLike for DummyFd {
     fn path(&self) -> Cow<'_, str> {
         "anon_inode:[dummy]".into()
     }
+
+    fn is_socket_operable(&self) -> bool {
+        false
+    }
 }
 impl Pollable for DummyFd {
     fn poll(&self) -> IoEvents {

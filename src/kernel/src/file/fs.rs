@@ -191,6 +191,10 @@ impl FileLike for File {
         path_for(self.inner.location())
     }
 
+    fn is_socket_operable(&self) -> bool {
+        !self.inner().is_path()
+    }
+
     fn from_fd(fd: c_int) -> AxResult<Arc<Self>>
     where
         Self: Sized + 'static,
