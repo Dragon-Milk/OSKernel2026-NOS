@@ -234,6 +234,41 @@ fn open_create_metadata(
     })
 }
 
+fn check_open_permission(loc: &Location, flags: i32, uid: u32, gid: u32) -> AxResult<()> {
+    if uid == 0 || flags as u32 & O_PATH != 0 {
+        return Ok(());
+    }
+
+    let metadata = loc.metadata()?;
+    let mode = NodePermission::from_bits_truncate(metadata.mode.bits());
+    let (read_bit, write_bit) = if uid == metadata.uid {
+        (NodePermission::OWNER_READ, NodePermission::OWNER_WRITE)
+    } else if gid == metadata.gid {
+        (NodePermission::GROUP_READ, NodePermission::GROUP_WRITE)
+    } else {
+        (NodePermission::OTHER_READ, NodePermission::OTHER_WRITE)
+    };
+
+    match flags as u32 & 0b11 {
+        O_RDONLY => {
+            if !mode.contains(read_bit) {
+                return Err(AxError::PermissionDenied);
+            }
+        }
+        O_WRONLY => {
+            if !mode.contains(write_bit) {
+                return Err(AxError::PermissionDenied);
+            }
+        }
+        _ => {
+            if !mode.contains(read_bit) || !mode.contains(write_bit) {
+                return Err(AxError::PermissionDenied);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn add_to_fd(result: OpenResult, flags: u32) -> AxResult<i32> {
     let f: Arc<dyn FileLike> = match result {
         OpenResult::File(mut file) => {
@@ -334,6 +369,7 @@ pub fn sys_openat(
     let mode = NodePermission::from_bits_truncate(mode as u16);
 
     let credentials = VfsCredentials::effective();
+    let (fsuid, fsgid) = current().as_thread().proc_data.fsids();
     check_open_nofollow(dirfd, &path, flags)?;
     check_open_permission(dirfd, &path, flags)?;
     check_noatime_permission(dirfd, &path, flags, credentials)?;
@@ -351,6 +387,15 @@ pub fn sys_openat(
     let result = open_with_options(dirfd, &path, &options);
 
     result
+        .and_then(|it| {
+            match &it {
+                OpenResult::File(file) => {
+                    check_open_permission(file.location(), flags, fsuid, fsgid)?
+                }
+                OpenResult::Dir(_) => {}
+            }
+            Ok(it)
+        })
         .and_then(|it| add_to_fd(it, flags as _))
         .map(|fd| fd as isize)
 }

@@ -13,8 +13,8 @@ export NET := y
 export VSOCK := n
 export MEM := 1G
 export ICOUNT := n
-export TEST_PROFILE ?= ltp-batch
-export LTP_CATEGORY ?= fs
+export TEST_PROFILE ?= full
+export LTP_CATEGORY ?= process
 export LTP_BATCH ?= all
 export LTP_LIBC ?= both
 
@@ -29,7 +29,7 @@ export AX_LIB := axfeat
 export APP_FEATURES := qemu
 
 ifeq ($(MEMTRACK), y)
-	APP_FEATURES += starry-api/memtrack
+	APP_FEATURES += memtrack
 endif
 
 ifeq ($(TEST_PROFILE), perf)

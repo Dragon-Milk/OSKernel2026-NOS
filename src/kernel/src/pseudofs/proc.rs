@@ -26,7 +26,7 @@ use crate::{
         DirMaker, DirMapping, NodeOpsMux, RwFile, SimpleDir, SimpleDirOps, SimpleFile,
         SimpleFileOperation, SimpleFs,
     },
-    task::{AsThread, TaskStat, get_task, tasks},
+    task::{AsThread, TaskStat, get_process_task, get_task, tasks},
 };
 
 const DUMMY_MEMINFO: &str = indoc! {"
@@ -89,15 +89,18 @@ const DUMMY_MEMINFO: &str = indoc! {"
     DirectMap1G:     1048576 kB
 "};
 
-const LTP_KERNEL_CONFIG_GZ: &[u8] = &[
-    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x55, 0xcc, 0xb1, 0x0e, 0x80,
-    0x20, 0x0c, 0x04, 0xd0, 0xdd, 0xef, 0x71, 0x75, 0x68, 0x2a, 0x20, 0xb1, 0x52, 0x42, 0xab,
-    0xc1, 0xa9, 0xdf, 0xe1, 0xdf, 0x6b, 0xa2, 0x89, 0x30, 0xde, 0xbb, 0xdc, 0x21, 0x27, 0x1f,
-    0x83, 0xf9, 0x48, 0xce, 0x88, 0x71, 0x8d, 0x29, 0x4c, 0xd7, 0x80, 0x9f, 0x2e, 0x90, 0x66,
-    0x72, 0x0d, 0x68, 0xd9, 0x13, 0x82, 0xb6, 0x04, 0xf4, 0xec, 0x3a, 0x72, 0x55, 0x47, 0xf3,
-    0xf2, 0x83, 0x6e, 0xb9, 0x8d, 0xb9, 0x30, 0x76, 0xbd, 0x28, 0x68, 0x6d, 0x2e, 0xc5, 0x32,
-    0x4b, 0xac, 0x06, 0x48, 0xbf, 0xf2, 0xe1, 0x0a, 0xc1, 0xf9, 0x0e, 0x6f, 0x93, 0x3e, 0x75,
-    0x41, 0xb7, 0x00, 0x00, 0x00,
+const DUMMY_CPUINFO: &str = indoc! {"
+    processor\t: 0
+    hart\t\t: 0
+    isa\t\t: rv64imafdcsu
+    mmu\t\t: sv39
+    uarch\t\t: qemu
+"};
+
+const DUMMY_CONFIG_GZ: &[u8] = &[
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x73, 0xf6, 0xf7, 0x73, 0x74,
+    0x8f, 0x77, 0xf6, 0xf7, 0x73, 0x8c, 0xf7, 0xf5, 0xf1, 0xf1, 0x77, 0x56, 0x70, 0x74, 0x75,
+    0x0d, 0xe1, 0x02, 0x00, 0xd9, 0xb6, 0x58, 0x4b, 0x14, 0x00, 0x00, 0x00,
 ];
 
 pub fn new_procfs() -> Filesystem {
@@ -364,8 +367,13 @@ impl SimpleDirOps for ProcFsHandler {
         let task = if name == "self" {
             current().clone()
         } else {
-            let tid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
-            get_task(tid).map_err(|_| VfsError::NotFound)?
+            let pid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
+            if pid == 1 {
+                let init_pid = starry_process::init_proc().pid();
+                get_process_task(init_pid).map_err(|_| VfsError::NotFound)?
+            } else {
+                get_process_task(pid).map_err(|_| VfsError::NotFound)?
+            }
         };
         let node = NodeOpsMux::Dir(SimpleDir::new_maker(
             self.0.clone(),
@@ -391,22 +399,16 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         }),
     );
     root.add(
+        "meminfo",
+        SimpleFile::new_regular(fs.clone(), || Ok(DUMMY_MEMINFO)),
+    );
+    root.add(
         "cpuinfo",
-        SimpleFile::new_regular(fs.clone(), || {
-            Ok("processor\t: 0\n\
-                hart\t\t: 0\n\
-                isa\t\t: rv64imafdc\n\
-                mmu\t\t: sv39\n\
-                uarch\t\t: sifive,u74-mc\n\n")
-        }),
+        SimpleFile::new_regular(fs.clone(), || Ok(DUMMY_CPUINFO)),
     );
     root.add(
         "config.gz",
-        SimpleFile::new_regular(fs.clone(), || Ok(LTP_KERNEL_CONFIG_GZ)),
-    );
-    root.add(
-        "meminfo",
-        SimpleFile::new_regular(fs.clone(), || Ok(DUMMY_MEMINFO)),
+        SimpleFile::new_regular(fs.clone(), || Ok(DUMMY_CONFIG_GZ.to_vec())),
     );
     root.add(
         "meminfo2",
@@ -451,7 +453,23 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
 
             kernel.add(
                 "pid_max",
-                SimpleFile::new_regular(fs.clone(), || Ok("32768\n")),
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    RwFile::new(|req| match req {
+                        SimpleFileOperation::Read => Ok(Some(b"4194304\n".to_vec())),
+                        SimpleFileOperation::Write(_) => Ok(None),
+                    }),
+                ),
+            );
+            kernel.add(
+                "core_pattern",
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    RwFile::new(|req| match req {
+                        SimpleFileOperation::Read => Ok(Some(b"core\n".to_vec())),
+                        SimpleFileOperation::Write(_) => Ok(None),
+                    }),
+                ),
             );
             kernel.add(
                 "tainted",
@@ -522,6 +540,38 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             );
 
             SimpleDir::new_maker(fs.clone(), Arc::new(vm))
+        });
+
+        sys.add("net", {
+            let mut net = DirMapping::new();
+            net.add("ipv4", {
+                let mut ipv4 = DirMapping::new();
+                ipv4.add("conf", {
+                    let mut conf = DirMapping::new();
+                    let tag_file = || {
+                        SimpleFile::new_regular(
+                            fs.clone(),
+                            RwFile::new(|req| match req {
+                                SimpleFileOperation::Read => Ok(Some(b"0\n".to_vec())),
+                                SimpleFileOperation::Write(_) => Ok(None),
+                            }),
+                        )
+                    };
+                    conf.add("lo", {
+                        let mut lo = DirMapping::new();
+                        lo.add("tag", tag_file());
+                        SimpleDir::new_maker(fs.clone(), Arc::new(lo))
+                    });
+                    conf.add("default", {
+                        let mut default = DirMapping::new();
+                        default.add("tag", tag_file());
+                        SimpleDir::new_maker(fs.clone(), Arc::new(default))
+                    });
+                    SimpleDir::new_maker(fs.clone(), Arc::new(conf))
+                });
+                SimpleDir::new_maker(fs.clone(), Arc::new(ipv4))
+            });
+            SimpleDir::new_maker(fs.clone(), Arc::new(net))
         });
 
         SimpleDir::new_maker(fs.clone(), Arc::new(sys))

@@ -1,4 +1,5 @@
 use alloc::{
+    collections::BTreeSet,
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -7,7 +8,7 @@ use core::{ffi::c_long, sync::atomic::Ordering};
 use axerrno::{AxError, AxResult};
 use axtask::{current, AxTaskRef, TaskInner, WeakAxTaskRef};
 use bytemuck::AnyBitPattern;
-use linux_raw_sys::general::ROBUST_LIST_LIMIT;
+use linux_raw_sys::general::{RLIMIT_CPU, ROBUST_LIST_LIMIT};
 use spin::RwLock;
 use starry_process::{Pid, ProcessGroup, Session};
 use starry_signal::{SignalInfo, Signo};
@@ -16,7 +17,7 @@ use weak_map::WeakMap;
 
 use super::{
     futex_table_for, send_signal_thread_inner, send_signal_to_process, send_signal_to_thread,
-    AsThread, FutexKey, ProcessData, TimerState,
+    AsThread, FutexKey, ProcessData, Thread, TimerState,
 };
 use crate::file::record_lock;
 
@@ -27,6 +28,16 @@ static PROCESS_TABLE: RwLock<WeakMap<Pid, Weak<ProcessData>>> = RwLock::new(Weak
 static PROCESS_GROUP_TABLE: RwLock<WeakMap<Pid, Weak<ProcessGroup>>> = RwLock::new(WeakMap::new());
 
 static SESSION_TABLE: RwLock<WeakMap<Pid, Weak<Session>>> = RwLock::new(WeakMap::new());
+
+static INIT_AUTO_REAP_PIDS: RwLock<BTreeSet<Pid>> = RwLock::new(BTreeSet::new());
+
+fn mark_init_auto_reap(pid: Pid) {
+    INIT_AUTO_REAP_PIDS.write().insert(pid);
+}
+
+fn take_init_auto_reap(pid: Pid) -> bool {
+    INIT_AUTO_REAP_PIDS.write().remove(&pid)
+}
 
 /// Cleanup expired entries in the task tables.
 ///
@@ -84,6 +95,20 @@ pub fn get_task(tid: Pid) -> AxResult<AxTaskRef> {
     TASK_TABLE.read().get(&tid).ok_or(AxError::NoSuchProcess)
 }
 
+/// Finds a representative task for the process with the given PID.
+pub fn get_process_task(pid: Pid) -> AxResult<AxTaskRef> {
+    if pid == 0 {
+        return Ok(current().clone());
+    }
+    let proc_data = get_process_data(pid)?;
+    for tid in proc_data.proc.threads() {
+        if let Ok(task) = get_task(tid) {
+            return Ok(task);
+        }
+    }
+    Err(AxError::NoSuchProcess)
+}
+
 /// Lists all processes.
 pub fn processes() -> Vec<Arc<ProcessData>> {
     PROCESS_TABLE.read().values().collect()
@@ -105,6 +130,11 @@ pub fn get_process_group(pgid: Pid) -> AxResult<Arc<ProcessGroup>> {
         .ok_or(AxError::NoSuchProcess)
 }
 
+/// Registers a process group created after task insertion.
+pub fn register_process_group(group: &Arc<ProcessGroup>) {
+    PROCESS_GROUP_TABLE.write().insert(group.pgid(), group);
+}
+
 /// Finds the session with the given SID.
 pub fn get_session(sid: Pid) -> AxResult<Arc<Session>> {
     SESSION_TABLE.read().get(&sid).ok_or(AxError::NoSuchProcess)
@@ -122,6 +152,26 @@ pub fn poll_timer(task: &TaskInner) {
     time.poll(|signo| {
         send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));
     });
+    check_cpu_limit(task, thr, &time);
+}
+
+fn check_cpu_limit(task: &TaskInner, thr: &Thread, time: &crate::task::TimeManager) {
+    let cpu_limit = thr.proc_data.rlim.read()[RLIMIT_CPU].current;
+    let cpu_hard_limit = thr.proc_data.rlim.read()[RLIMIT_CPU].max;
+    if cpu_limit == 0 && cpu_hard_limit == 0 {
+        return;
+    }
+
+    let (utime, stime) = time.output();
+    let cpu_secs = (utime + stime).as_secs();
+    if cpu_hard_limit != 0 && cpu_secs >= cpu_hard_limit {
+        send_signal_thread_inner(task, thr, SignalInfo::new_kernel(Signo::SIGKILL));
+    } else if cpu_limit != 0
+        && cpu_secs >= cpu_limit
+        && !thr.proc_data.mark_cpu_limit_signal_sent()
+    {
+        send_signal_thread_inner(task, thr, SignalInfo::new_kernel(Signo::SIGXCPU));
+    }
 }
 
 /// Sets the timer state.
@@ -136,6 +186,7 @@ pub fn set_timer_state(task: &TaskInner, state: TimerState) {
     time.poll(|signo| {
         send_signal_thread_inner(task, thr, SignalInfo::new_kernel(signo));
     });
+    check_cpu_limit(task, thr, &time);
     time.set_state(state);
 }
 
@@ -176,13 +227,25 @@ pub fn exit_robust_list(head: *const RobustListHead) -> AxResult<()> {
     let mut limit = ROBUST_LIST_LIMIT;
 
     let end_ptr = unsafe { &raw const (*head).list };
-    let head = head.vm_read()?;
+    let head = match head.vm_read() {
+        Ok(head) => head,
+        Err(err) => {
+            debug!("ignore invalid robust list head on exit: {err:?}");
+            return Ok(());
+        }
+    };
     let mut entry = head.list.next;
     let offset = head.futex_offset;
     let pending = head.list_op_pending;
 
     while !core::ptr::eq(entry, end_ptr) {
-        let next_entry = entry.vm_read()?.next;
+        let next_entry = match entry.vm_read() {
+            Ok(entry) => entry.next,
+            Err(err) => {
+                debug!("stop invalid robust list walk on exit: {err:?}");
+                break;
+            }
+        };
         if entry != pending {
             handle_futex_death(entry, offset)?;
         }
@@ -228,7 +291,22 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
     let process = &thr.proc_data.proc;
     if process.exit_thread(curr.id().as_u64() as Pid, exit_code) {
         crate::perf::perf_end_process_case(process.pid() as u64);
+        if group_exit && !process.is_group_exited() {
+            process.group_exit();
+        }
+        let orphaned_children = process.children();
+        for child in &orphaned_children {
+            mark_init_auto_reap(child.pid());
+        }
         process.exit();
+        let mut reaped_orphans = false;
+        for child in orphaned_children {
+            if child.is_zombie() {
+                child.free();
+                take_init_auto_reap(child.pid());
+                reaped_orphans = true;
+            }
+        }
         if let Some(parent) = process.parent() {
             if let Some(signo) = thr.proc_data.exit_signal {
                 let _ = send_signal_to_process(parent.pid(), Some(SignalInfo::new_kernel(signo)));
@@ -236,9 +314,17 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
             if let Ok(data) = get_process_data(parent.pid()) {
                 data.child_exit_event.wake();
             }
+            if parent.is_init() && take_init_auto_reap(process.pid()) {
+                process.free();
+                cleanup_task_tables();
+            }
+        }
+        if reaped_orphans {
+            cleanup_task_tables();
         }
         thr.proc_data.exit_event.wake();
 
+        crate::syscall::clear_posix_timers_for_process(process.pid());
         crate::syscall::SHM_MANAGER
             .lock()
             .clear_proc_shm(process.pid());

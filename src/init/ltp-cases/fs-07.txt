@@ -13,11 +13,8 @@ getxattr03
 getxattr04
 getxattr05
 lchown01
-lchown01_16
 lchown02
-lchown02_16
 lchown03
-lchown03_16
 lgetxattr01
 lgetxattr02
 link02

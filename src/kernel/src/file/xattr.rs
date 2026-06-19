@@ -84,8 +84,7 @@ fn check_xattr_namespace_permission(name: &[u8], _loc: &Location) -> AxResult<()
         }
         b"trusted" | b"security" | b"system" => {
             // Require effective root (uid == 0).
-            let creds = current().as_thread().proc_data.credentials();
-            if creds.effective_uid == 0 {
+            if current().as_thread().proc_data.ids().1 == 0 {
                 Ok(())
             } else {
                 // For system.*, Linux returns EOPNOTSUPP for regular users.
@@ -196,8 +195,7 @@ pub fn do_listxattr(loc: &Location) -> AxResult<Vec<u8>> {
         let allowed = match ns {
             b"user" => true,
             _ => {
-                let creds = current().as_thread().proc_data.credentials();
-                creds.effective_uid == 0
+                current().as_thread().proc_data.ids().1 == 0
             }
         };
         if allowed {

@@ -12,6 +12,7 @@ use axfs_ng_vfs::{
     DeviceId, Location, Metadata, NodeFlags, NodePermission, NodeType,
     path::{Component, Path, PathBuf},
 };
+use axio::{IoBuf, Read, Seek};
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
 use axtask::{
@@ -20,7 +21,7 @@ use axtask::{
 };
 use linux_raw_sys::general::{
     AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, MS_RDONLY, O_APPEND, O_NONBLOCK, O_PATH, O_RDWR,
-    O_NOATIME, O_WRONLY,
+    O_NOATIME, O_WRONLY, RLIMIT_FSIZE,
 };
 
 use super::{FileLike, Kstat, get_file_like, get_inode_flags};
@@ -47,18 +48,18 @@ pub struct VfsCredentials {
 
 impl VfsCredentials {
     pub fn real() -> Self {
-        let credentials = current().as_thread().proc_data.credentials();
+        let (ruid, _, _, rgid, _, _) = current().as_thread().proc_data.ids();
         Self {
-            uid: credentials.real_uid,
-            gid: credentials.real_gid,
+            uid: ruid,
+            gid: rgid,
         }
     }
 
     pub fn effective() -> Self {
-        let credentials = current().as_thread().proc_data.credentials();
+        let (_, euid, _, _, egid, _) = current().as_thread().proc_data.ids();
         Self {
-            uid: credentials.effective_uid,
-            gid: credentials.effective_gid,
+            uid: euid,
+            gid: egid,
         }
     }
 
@@ -67,11 +68,12 @@ impl VfsCredentials {
     }
 
     pub fn in_group(self, gid: u32) -> bool {
-        self.gid == gid
-            || current()
-                .as_thread()
-                .proc_data
-                .has_supplementary_group(gid)
+        self.gid == gid || self.has_supplementary_group(gid)
+    }
+
+    fn has_supplementary_group(&self, gid: u32) -> bool {
+        let (count, groups) = current().as_thread().proc_data.groups();
+        groups[..count].iter().any(|&g| g == gid)
     }
 }
 
@@ -82,6 +84,26 @@ pub fn check_path_len(path: &str) -> AxResult<()> {
         Err(AxError::NameTooLong)
     } else {
         Ok(())
+    }
+}
+
+struct LimitedSrc<'a> {
+    inner: &'a mut IoSrc<'a>,
+    remaining: usize,
+}
+
+impl Read for LimitedSrc<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> axio::Result<usize> {
+        let len = buf.len().min(self.remaining);
+        let read = self.inner.read(&mut buf[..len])?;
+        self.remaining -= read;
+        Ok(read)
+    }
+}
+
+impl IoBuf for LimitedSrc<'_> {
+    fn remaining(&self) -> usize {
+        self.inner.remaining().min(self.remaining)
     }
 }
 
@@ -541,7 +563,21 @@ impl FileLike for File {
     }
 
     fn write(&self, src: &mut IoSrc) -> AxResult<usize> {
-        let inner = self.inner();
+        let mut inner = self.inner();
+        let file_limit = axtask::current().as_thread().proc_data.rlim.read()[RLIMIT_FSIZE].current;
+        if file_limit != 0 {
+            let pos = inner.stream_position()?;
+            if pos >= file_limit {
+                return Ok(0);
+            }
+            let allowed = (file_limit - pos) as usize;
+            if src.remaining() > allowed {
+                return inner.write(&mut LimitedSrc {
+                    inner: src,
+                    remaining: allowed,
+                });
+            }
+        }
         if likely(self.is_blocking()) {
             inner.write(src)
         } else {

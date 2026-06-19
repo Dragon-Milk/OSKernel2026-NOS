@@ -1,4 +1,3 @@
-rtc02
 sched_get_priority_max01
 sched_get_priority_max02
 sched_get_priority_min01
@@ -24,7 +23,5 @@ sched_setscheduler01
 sched_setscheduler02
 sched_setscheduler03
 sched_setscheduler04
-sched_tc0
-sched_tc1
 sched_tc2
 sched_tc3

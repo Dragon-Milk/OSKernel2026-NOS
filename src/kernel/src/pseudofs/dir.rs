@@ -12,6 +12,7 @@ use axfs_ng_vfs::{
     NodeOps, NodePermission, NodeType, Reference, VfsError, VfsResult, WeakDirEntry,
     path::{DOT, DOTDOT},
 };
+use axsync::Mutex;
 use inherit_methods_macro::inherit_methods;
 
 use super::{DirMaker, NodeOpsMux, SimpleFs, SimpleFsNode};
@@ -28,6 +29,11 @@ pub trait SimpleDirOps: Send + Sync + 'static {
     /// See [`DirNodeOps::is_cacheable`].
     fn is_cacheable(&self) -> bool {
         true
+    }
+
+    /// Look up a child and report whether this particular child can be cached.
+    fn lookup_child_with_cacheable(&self, name: &str) -> VfsResult<(NodeOpsMux, bool)> {
+        self.lookup_child(name).map(|ops| (ops, self.is_cacheable()))
     }
 
     /// Combines two directories into one.
@@ -86,6 +92,14 @@ impl<A: SimpleDirOps, B: SimpleDirOps> SimpleDirOps for ChainedDirOps<A, B> {
         }
     }
 
+    fn lookup_child_with_cacheable(&self, name: &str) -> VfsResult<(NodeOpsMux, bool)> {
+        match self.0.lookup_child_with_cacheable(name) {
+            Ok(result) => Ok(result),
+            Err(VfsError::NotFound) => self.1.lookup_child_with_cacheable(name),
+            Err(e) => Err(e),
+        }
+    }
+
     fn is_cacheable(&self) -> bool {
         // TODO: If one of the ops is not cacheable while the other is, the
         // behavior is undefined.
@@ -98,11 +112,17 @@ pub struct SimpleDir<O> {
     node: SimpleFsNode,
     this: WeakDirEntry,
     ops: Arc<O>,
+    cache: Mutex<BTreeMap<String, DirEntry>>,
 }
 
 impl<O: SimpleDirOps> SimpleDir<O> {
     fn new(node: SimpleFsNode, ops: Arc<O>, this: WeakDirEntry) -> Arc<Self> {
-        Arc::new(Self { node, this, ops })
+        Arc::new(Self {
+            node,
+            this,
+            ops,
+            cache: Mutex::new(BTreeMap::new()),
+        })
     }
 
     /// Create a [`DirMaker`] from given directory operations.
@@ -170,9 +190,13 @@ impl<O: SimpleDirOps> DirNodeOps for SimpleDir<O> {
     }
 
     fn lookup(&self, name: &str) -> VfsResult<DirEntry> {
-        let ops = self.ops.lookup_child(name)?;
+        if let Some(entry) = self.cache.lock().get(name).cloned() {
+            return Ok(entry);
+        }
+
+        let (ops, cacheable) = self.ops.lookup_child_with_cacheable(name)?;
         let reference = Reference::new(self.this.upgrade(), name.to_owned());
-        Ok(match ops {
+        let entry = match ops {
             NodeOpsMux::Dir(maker) => {
                 DirEntry::new_dir(|this| DirNode::new(maker(this)), reference)
             }
@@ -180,7 +204,11 @@ impl<O: SimpleDirOps> DirNodeOps for SimpleDir<O> {
                 let node_type = ops.metadata()?.node_type;
                 DirEntry::new_file(FileNode::new(ops.clone()), node_type, reference)
             }
-        })
+        };
+        if cacheable {
+            self.cache.lock().insert(name.to_owned(), entry.clone());
+        }
+        Ok(entry)
     }
 
     fn is_cacheable(&self) -> bool {

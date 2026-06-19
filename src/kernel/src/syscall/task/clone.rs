@@ -1,9 +1,10 @@
 use alloc::sync::Arc;
+use core::task::Poll;
 
 use axerrno::{AxError, AxResult};
 use axfs::FS_CONTEXT;
 use axhal::uspace::UserContext;
-use axtask::{AxTaskExt, current, spawn_task};
+use axtask::{future::block_on, AxTaskExt, current, spawn_task};
 use bitflags::bitflags;
 use kspin::SpinNoIrq;
 use linux_raw_sys::general::*;
@@ -12,8 +13,9 @@ use starry_signal::Signo;
 use starry_vm::VmMutPtr;
 
 use crate::{
-    file::{FD_TABLE, FileLike, PidFd, close_file_like},
+    file::{FD_TABLE, FileLike, PidFd},
     mm::copy_from_kernel,
+    syscall::current_uts_state,
     task::{AsThread, ProcessData, Thread, add_task_to_table, new_user_task},
 };
 
@@ -86,6 +88,8 @@ pub struct CloneArgs {
     pub flags: CloneFlags,
     pub exit_signal: u64,
     pub stack: usize,
+    pub stack_size: usize,
+    pub from_clone3: bool,
     pub tls: usize,
     pub parent_tid: usize,
     pub child_tid: usize,
@@ -95,12 +99,9 @@ pub struct CloneArgs {
 impl CloneArgs {
     fn validate(&self) -> AxResult<()> {
         let Self {
-            flags, exit_signal, ..
+            flags, ..
         } = self;
 
-        if *exit_signal > 0 && flags.intersects(CloneFlags::THREAD | CloneFlags::PARENT) {
-            return Err(AxError::InvalidInput);
-        }
         if flags.contains(CloneFlags::THREAD)
             && !flags.contains(CloneFlags::VM | CloneFlags::SIGHAND)
         {
@@ -109,7 +110,13 @@ impl CloneArgs {
         if flags.contains(CloneFlags::SIGHAND) && !flags.contains(CloneFlags::VM) {
             return Err(AxError::InvalidInput);
         }
-        if flags.contains(CloneFlags::VFORK | CloneFlags::THREAD) {
+        if flags.contains(CloneFlags::VFORK) && flags.contains(CloneFlags::THREAD) {
+            return Err(AxError::InvalidInput);
+        }
+        if flags.contains(CloneFlags::FS | CloneFlags::NEWNS) {
+            return Err(AxError::InvalidInput);
+        }
+        if self.from_clone3 && (self.stack == 0) != (self.stack_size == 0) {
             return Err(AxError::InvalidInput);
         }
         if flags.contains(CloneFlags::PIDFD | CloneFlags::DETACHED) {
@@ -128,6 +135,10 @@ impl CloneArgs {
             warn!("sys_clone/sys_clone3: namespace flags detected, stub support only");
         }
 
+        if flags.contains(CloneFlags::NEWUTS) && current().as_thread().proc_data.ids().1 != 0 {
+            return Err(AxError::OperationNotPermitted);
+        }
+
         Ok(())
     }
 
@@ -135,18 +146,19 @@ impl CloneArgs {
         self.validate()?;
 
         let Self {
-            mut flags,
+            flags,
             exit_signal,
             stack,
+            stack_size: _,
             tls,
             parent_tid,
             child_tid,
             pidfd,
+            ..
         } = self;
 
-        if flags.contains(CloneFlags::VFORK) {
-            debug!("do_clone: CLONE_VFORK slow path");
-            flags.remove(CloneFlags::VM);
+        if flags.contains(CloneFlags::PIDFD) && pidfd != 0 {
+            (pidfd as *mut i32).vm_write(0)?;
         }
 
         debug!(
@@ -154,7 +166,9 @@ impl CloneArgs {
             flags, exit_signal, stack, tls
         );
 
-        let exit_signal = if exit_signal > 0 {
+        let exit_signal = if flags.contains(CloneFlags::THREAD) {
+            None
+        } else if exit_signal > 0 {
             Some(Signo::from_repr(exit_signal as u8).ok_or(AxError::InvalidInput)?)
         } else {
             None
@@ -191,13 +205,6 @@ impl CloneArgs {
                 .set_page_table_root(old_proc_data.aspace.lock().page_table_root());
             old_proc_data.clone()
         } else {
-            let proc = if flags.contains(CloneFlags::PARENT) {
-                old_proc_data.proc.parent().ok_or(AxError::InvalidInput)?
-            } else {
-                old_proc_data.proc.clone()
-            }
-            .fork(tid);
-
             let aspace = if flags.contains(CloneFlags::VM) {
                 old_proc_data.aspace.clone()
             } else {
@@ -218,6 +225,13 @@ impl CloneArgs {
                 Arc::new(SpinNoIrq::new(old_proc_data.signal.actions.lock().clone()))
             };
 
+            let parent_proc = if flags.contains(CloneFlags::PARENT) {
+                old_proc_data.proc.parent().ok_or(AxError::InvalidInput)?
+            } else {
+                old_proc_data.proc.clone()
+            };
+            let proc = parent_proc.fork(tid);
+
             let proc_data = ProcessData::new(
                 proc,
                 old_proc_data.exe_path.read().clone(),
@@ -227,8 +241,21 @@ impl CloneArgs {
                 exit_signal,
             );
             proc_data.set_umask(old_proc_data.umask());
-            proc_data.set_credentials(old_proc_data.credentials());
             proc_data.set_heap_top(old_proc_data.get_heap_top());
+            let (ruid, euid, suid, rgid, egid, sgid) = old_proc_data.ids();
+            proc_data.set_resuid(Some(ruid), Some(euid), Some(suid));
+            proc_data.set_resgid(Some(rgid), Some(egid), Some(sgid));
+            let (fsuid, fsgid) = old_proc_data.fsids();
+            proc_data.set_fsuid(fsuid);
+            proc_data.set_fsgid(fsgid);
+            let (group_count, groups) = old_proc_data.groups();
+            proc_data.set_groups(&groups[..group_count]);
+            proc_data.set_capabilities(old_proc_data.capabilities());
+            if flags.contains(CloneFlags::NEWUTS) {
+                proc_data.set_uts_state(old_proc_data.uts_state().unwrap_or_else(current_uts_state));
+            } else if let Some(uts_state) = old_proc_data.uts_state() {
+                proc_data.set_uts_state(uts_state);
+            }
 
             {
                 let mut scope = proc_data.scope.write();
@@ -257,6 +284,14 @@ impl CloneArgs {
         new_proc_data.proc.add_thread(tid);
 
         let thr = Thread::new(tid, new_proc_data.clone());
+        let old_thread = curr.as_thread();
+        thr.set_sched_param(old_thread.sched_policy(), old_thread.sched_priority());
+        let (runtime, deadline, period) = old_thread.sched_deadline_params();
+        thr.set_sched_deadline_params(runtime, deadline, period);
+        thr.set_nice(old_thread.nice());
+        thr.set_personality(old_thread.personality());
+        thr.set_timer_slack_ns(old_thread.timer_slack_ns());
+        thr.set_default_timer_slack_ns(old_thread.timer_slack_ns());
         if flags.contains(CloneFlags::CHILD_CLEARTID) {
             thr.set_clear_child_tid(child_tid);
         }
@@ -267,15 +302,25 @@ impl CloneArgs {
                 PidFd::new_process(&new_proc_data)
             };
             let fd = pidfd_obj.add_to_fd_table(true)?;
-            if let Err(err) = (pidfd as *mut i32).vm_write(fd) {
-                let _ = close_file_like(fd);
-                return Err(err.into());
-            }
+            (pidfd as *mut i32).vm_write(fd)?;
         }
         *new_task.task_ext_mut() = Some(AxTaskExt::from_impl(thr));
 
         let task = spawn_task(new_task);
         add_task_to_table(&task);
+
+        if self.flags.contains(CloneFlags::VFORK) {
+            let exit_event = new_proc_data.exit_event.clone();
+            let proc = new_proc_data.proc.clone();
+            block_on(core::future::poll_fn(|cx| {
+                if proc.is_group_exited() {
+                    Poll::Ready(())
+                } else {
+                    exit_event.register(cx.waker());
+                    Poll::Pending
+                }
+            }));
+        }
 
         Ok(tid as _)
     }
@@ -294,7 +339,7 @@ pub fn sys_clone(
     let clone_flags = CloneFlags::from_bits_truncate((flags & !FLAG_MASK) as u64);
     let exit_signal = (flags & FLAG_MASK) as u64;
 
-    if clone_flags.contains(CloneFlags::PIDFD | CloneFlags::PARENT_SETTID) {
+    if clone_flags.contains(CloneFlags::PIDFD) && clone_flags.contains(CloneFlags::PARENT_SETTID) {
         return Err(AxError::InvalidInput);
     }
 
@@ -302,6 +347,8 @@ pub fn sys_clone(
         flags: clone_flags,
         exit_signal,
         stack,
+        stack_size: 0,
+        from_clone3: false,
         tls,
         parent_tid,
         child_tid,

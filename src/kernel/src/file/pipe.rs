@@ -72,7 +72,7 @@ impl Shared {
         let init_size = {
             let max = PIPE_MAX_SIZE.load(Ordering::Acquire);
             if max < RING_BUFFER_INIT_SIZE
-                && current().as_thread().proc_data.credentials().effective_uid != 0
+                && current().as_thread().proc_data.ids().1 != 0
             {
                 max
             } else {

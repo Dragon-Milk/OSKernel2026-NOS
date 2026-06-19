@@ -315,7 +315,23 @@ pub(crate) fn busybox_applet(path: &str) -> Option<(&'static str, &str)> {
     }
 
     let name = path.rsplit('/').next().unwrap_or(path);
-    if !matches!(name, "kill" | "ls" | "mkdir" | "rmdir" | "sleep" | "which") {
+    if !matches!(
+        name,
+        "cat"
+            | "chmod"
+            | "cp"
+            | "kill"
+            | "ls"
+            | "mkdir"
+            | "rm"
+            | "rmdir"
+            | "sh"
+            | "sleep"
+            | "touch"
+            | "true"
+            | "which"
+            | "zcat"
+    ) {
         return None;
     }
 

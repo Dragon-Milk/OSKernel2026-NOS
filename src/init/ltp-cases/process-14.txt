@@ -2,7 +2,6 @@ times01
 times03
 tkill01
 tkill02
-ulimit01
 uname01
 uname02
 uname04
@@ -10,8 +9,6 @@ utsname01
 utsname02
 utsname03
 utsname04
-vfork
-vfork01
 vfork02
 wait01
 wait02

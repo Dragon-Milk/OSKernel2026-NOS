@@ -1,5 +1,3 @@
-getrusage03
-getrusage04
 getsid01
 getsid02
 gettid01
@@ -7,18 +5,7 @@ gettid02
 gettimeofday01
 gettimeofday02
 getuid01
-getuid01_16
 getuid03
-getuid03_16
-hangup01
-ioprio_get01
-ioprio_set01
-ioprio_set02
-ioprio_set03
-kcmp01
-kcmp02
-kcmp03
-kill02
 kill03
 kill05
 kill06

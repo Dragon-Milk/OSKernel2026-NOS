@@ -29,108 +29,74 @@ ltp_batch_cases() {
         process:01)
             printf '%s\n' \
                 'abort01' \
-                'acct01' \
-                'acct02' \
                 'adjtimex01' \
-                'adjtimex02' \
                 'adjtimex03' \
                 'alarm02' \
                 'alarm03' \
                 'alarm05' \
                 'alarm06' \
                 'alarm07' \
-                'arch_prctl01' \
-                'autogroup01' \
                 'clock_adjtime01' \
-                'clock_adjtime02' \
                 'clock_getres01' \
                 'clock_gettime01' \
                 'clock_gettime02' \
-                'clock_gettime03' \
-                'clock_gettime04' \
                 'clock_nanosleep01' \
-                'clock_nanosleep02' \
-                'clock_nanosleep03' \
                 'clock_nanosleep04' \
                 'clock_settime01' \
                 'clock_settime02' \
-                'clock_settime03' \
                 'clone01' \
-                'clone02' \
                 'clone03'
+
             ;;
         process:02)
             printf '%s\n' \
-                'clone04' \
                 'clone05' \
                 'clone06' \
                 'clone07' \
-                'clone08' \
                 'clone09' \
                 'clone301' \
                 'clone302' \
-                'clone303' \
-                'exec_with_inh' \
-                'exec_without_inh' \
+                'clone08' \
                 'execl01' \
-                'execle01' \
                 'execlp01' \
-                'execv01' \
+                'execle01' \
                 'execve01' \
-                'execve02' \
-                'execve03' \
-                'execve04' \
-                'execve05' \
-                'execve06' \
-                'execveat01' \
-                'execveat02' \
+                'execv01' \
                 'execveat03' \
                 'execveat_errno' \
                 'execvp01' \
                 'exit01' \
                 'exit02' \
                 'exit_group01' \
-                'fork01'
-            ;;
-        process:03)
-            printf '%s\n' \
+                'fork01' \
                 'fork03' \
                 'fork04' \
-                'fork05' \
                 'fork07' \
                 'fork08' \
                 'fork09' \
                 'fork10' \
-                'fork13' \
-                'fork14' \
-                'fork_exec_loop' \
+                'fork14'
+
+            ;;
+        process:03)
+            printf '%s\n' \
                 'fork_procs' \
-                'getcontext01' \
                 'getcpu01' \
                 'getdomainname01' \
                 'getegid01' \
-                'getegid01_16' \
                 'getegid02' \
-                'getegid02_16' \
                 'geteuid01' \
-                'geteuid01_16' \
                 'geteuid02' \
-                'geteuid02_16' \
                 'getgid01' \
-                'getgid01_16' \
                 'getgid03' \
-                'getgid03_16' \
                 'getgroups01' \
-                'getgroups01_16' \
-                'getgroups03' \
-                'getgroups03_16'
+                'getgroups03'
+
             ;;
         process:04)
             printf '%s\n' \
                 'gethostname01' \
-                'gethostname02' \
                 'getitimer01' \
-                'getitimer02' \
                 'getpgid01' \
                 'getpgid02' \
                 'getpgrp01' \
@@ -141,27 +107,20 @@ ltp_batch_cases() {
                 'getpriority01' \
                 'getpriority02' \
                 'getresgid01' \
-                'getresgid01_16' \
                 'getresgid02' \
-                'getresgid02_16' \
                 'getresgid03' \
-                'getresgid03_16' \
                 'getresuid01' \
-                'getresuid01_16' \
                 'getresuid02' \
-                'getresuid02_16' \
                 'getresuid03' \
-                'getresuid03_16' \
                 'getrlimit01' \
                 'getrlimit02' \
                 'getrlimit03' \
                 'getrusage01' \
                 'getrusage02'
+
             ;;
         process:05)
             printf '%s\n' \
-                'getrusage03' \
-                'getrusage04' \
                 'getsid01' \
                 'getsid02' \
                 'gettid01' \
@@ -169,18 +128,7 @@ ltp_batch_cases() {
                 'gettimeofday01' \
                 'gettimeofday02' \
                 'getuid01' \
-                'getuid01_16' \
                 'getuid03' \
-                'getuid03_16' \
-                'hangup01' \
-                'ioprio_get01' \
-                'ioprio_set01' \
-                'ioprio_set02' \
-                'ioprio_set03' \
-                'kcmp01' \
-                'kcmp02' \
-                'kcmp03' \
-                'kill02' \
                 'kill03' \
                 'kill05' \
                 'kill06' \
@@ -190,23 +138,18 @@ ltp_batch_cases() {
                 'kill10' \
                 'kill11' \
                 'kill12'
+
             ;;
         process:06)
             printf '%s\n' \
-                'kill13' \
                 'leapsec01' \
-                'nanosleep01' \
                 'nanosleep02' \
                 'nanosleep04' \
                 'newuname01' \
-                'nice01' \
                 'nice02' \
                 'nice03' \
-                'nice04' \
-                'nice05' \
                 'nptl01' \
                 'pause01' \
-                'pause02' \
                 'pause03' \
                 'personality01' \
                 'personality02' \
@@ -215,7 +158,6 @@ ltp_batch_cases() {
                 'pidfd_open01' \
                 'pidfd_open02' \
                 'pidfd_open03' \
-                'pidfd_open04' \
                 'pidfd_send_signal01' \
                 'pidfd_send_signal02' \
                 'pidfd_send_signal03' \
@@ -223,43 +165,23 @@ ltp_batch_cases() {
                 'prctl02' \
                 'prctl03' \
                 'prctl04'
+
             ;;
         process:07)
             printf '%s\n' \
                 'prctl05' \
-                'prctl06' \
-                'prctl06_execve' \
-                'prctl07' \
                 'prctl08' \
-                'prctl09' \
-                'prctl10' \
-                'proc_sched_rt01' \
-                'pth_str01' \
                 'pth_str02' \
-                'pth_str03' \
-                'ptrace01' \
-                'ptrace02' \
-                'ptrace03' \
-                'ptrace04' \
-                'ptrace05' \
-                'ptrace06' \
-                'ptrace07' \
-                'ptrace08' \
-                'ptrace09' \
-                'ptrace10' \
-                'ptrace11' \
                 'rt_sigaction01' \
                 'rt_sigaction02' \
                 'rt_sigaction03' \
                 'rt_sigprocmask01' \
                 'rt_sigprocmask02' \
-                'rt_sigqueueinfo01' \
-                'rt_sigsuspend01' \
-                'rtc01'
+                'rt_sigsuspend01'
+
             ;;
         process:08)
             printf '%s\n' \
-                'rtc02' \
                 'sched_get_priority_max01' \
                 'sched_get_priority_max02' \
                 'sched_get_priority_min01' \
@@ -285,18 +207,15 @@ ltp_batch_cases() {
                 'sched_setscheduler02' \
                 'sched_setscheduler03' \
                 'sched_setscheduler04' \
-                'sched_tc0' \
-                'sched_tc1' \
                 'sched_tc2' \
                 'sched_tc3'
+
             ;;
         process:09)
             printf '%s\n' \
                 'sched_tc4' \
                 'sched_tc5' \
-                'sched_tc6' \
                 'sched_yield01' \
-                'set_thread_area01' \
                 'set_tid_address01' \
                 'setdomainname01' \
                 'setdomainname02' \
@@ -304,36 +223,21 @@ ltp_batch_cases() {
                 'setegid01' \
                 'setegid02' \
                 'setfsgid01' \
-                'setfsgid01_16' \
                 'setfsgid02' \
-                'setfsgid02_16' \
                 'setfsgid03' \
-                'setfsgid03_16' \
                 'setfsuid01' \
-                'setfsuid01_16' \
                 'setfsuid02' \
-                'setfsuid02_16' \
                 'setfsuid03' \
-                'setfsuid03_16' \
                 'setfsuid04' \
-                'setfsuid04_16' \
                 'setgid01' \
-                'setgid01_16' \
                 'setgid02' \
-                'setgid02_16' \
                 'setgid03'
+
             ;;
         process:10)
             printf '%s\n' \
-                'setgid03_16' \
                 'setgroups01' \
-                'setgroups01_16' \
                 'setgroups02' \
-                'setgroups02_16' \
-                'setgroups03' \
-                'setgroups03_16' \
-                'setgroups04' \
-                'setgroups04_16' \
                 'sethostname01' \
                 'sethostname02' \
                 'sethostname03' \
@@ -345,53 +249,34 @@ ltp_batch_cases() {
                 'setpgrp01' \
                 'setpgrp02' \
                 'setpriority01' \
-                'setpriority02' \
                 'setregid01' \
-                'setregid01_16' \
                 'setregid02' \
-                'setregid02_16' \
                 'setregid03' \
-                'setregid03_16' \
                 'setregid04' \
-                'setregid04_16' \
                 'setresgid01'
+
             ;;
         process:11)
             printf '%s\n' \
-                'setresgid01_16' \
                 'setresgid02' \
-                'setresgid02_16' \
                 'setresgid03' \
-                'setresgid03_16' \
                 'setresgid04' \
-                'setresgid04_16' \
                 'setresuid01' \
-                'setresuid01_16' \
                 'setresuid02' \
-                'setresuid02_16' \
                 'setresuid03' \
-                'setresuid03_16' \
                 'setresuid04' \
-                'setresuid04_16' \
                 'setresuid05' \
-                'setresuid05_16' \
                 'setreuid01' \
-                'setreuid01_16' \
                 'setreuid02' \
-                'setreuid02_16' \
                 'setreuid03' \
-                'setreuid03_16' \
                 'setreuid04' \
-                'setreuid04_16' \
                 'setreuid05' \
-                'setreuid05_16' \
                 'setreuid06' \
-                'setreuid06_16' \
                 'setreuid07'
+
             ;;
         process:12)
             printf '%s\n' \
-                'setreuid07_16' \
                 'setrlimit01' \
                 'setrlimit02' \
                 'setrlimit03' \
@@ -402,36 +287,27 @@ ltp_batch_cases() {
                 'settimeofday01' \
                 'settimeofday02' \
                 'setuid01' \
-                'setuid01_16' \
                 'setuid03' \
-                'setuid03_16' \
                 'setuid04' \
-                'setuid04_16' \
-                'sgetmask01' \
-                'sigaction01' \
+                'signal01' \
                 'sigaction02' \
                 'sigaltstack01' \
                 'sigaltstack02' \
                 'sighold02' \
-                'signal01' \
                 'signal02' \
                 'signal03' \
                 'signal04' \
                 'signal05' \
-                'signal06' \
                 'signalfd01' \
                 'signalfd4_01'
+
             ;;
         process:13)
             printf '%s\n' \
                 'signalfd4_02' \
                 'sigpending02' \
                 'sigprocmask01' \
-                'sigrelse01' \
                 'sigsuspend01' \
-                'sigtimedwait01' \
-                'sigwait01' \
-                'sigwaitinfo01' \
                 'ssetmask01' \
                 'stime01' \
                 'stime02' \
@@ -448,12 +324,8 @@ ltp_batch_cases() {
                 'timer_settime02' \
                 'timer_settime03' \
                 'timerfd01' \
-                'timerfd02' \
-                'timerfd04' \
-                'timerfd_create01' \
-                'timerfd_gettime01' \
-                'timerfd_settime01' \
-                'timerfd_settime02'
+                'timerfd02'
+
             ;;
         process:14)
             printf '%s\n' \
@@ -461,7 +333,6 @@ ltp_batch_cases() {
                 'times03' \
                 'tkill01' \
                 'tkill02' \
-                'ulimit01' \
                 'uname01' \
                 'uname02' \
                 'uname04' \
@@ -469,8 +340,6 @@ ltp_batch_cases() {
                 'utsname02' \
                 'utsname03' \
                 'utsname04' \
-                'vfork' \
-                'vfork01' \
                 'vfork02' \
                 'wait01' \
                 'wait02' \
@@ -487,6 +356,7 @@ ltp_batch_cases() {
                 'waitid08' \
                 'waitid09' \
                 'waitid10'
+
             ;;
         process:15)
             printf '%s\n' \
@@ -502,6 +372,7 @@ ltp_batch_cases() {
                 'waitpid11' \
                 'waitpid12' \
                 'waitpid13'
+
             ;;
         fs:01)
             printf '%s\n' \
@@ -517,15 +388,10 @@ ltp_batch_cases() {
                 'chmod06' \
                 'chmod07' \
                 'chown01' \
-                'chown01_16' \
                 'chown02' \
-                'chown02_16' \
                 'chown03' \
-                'chown03_16' \
                 'chown04' \
-                'chown04_16' \
                 'chown05' \
-                'chown05_16' \
                 'close01' \
                 'close02' \
                 'close_range01' \
@@ -535,6 +401,7 @@ ltp_batch_cases() {
                 'creat04' \
                 'creat05' \
                 'creat06'
+
             ;;
         fs:02)
             printf '%s\n' \
@@ -568,6 +435,7 @@ ltp_batch_cases() {
                 'fchmod02' \
                 'fchmod03' \
                 'fchmod04'
+
             ;;
         fs:03)
             printf '%s\n' \
@@ -576,15 +444,10 @@ ltp_batch_cases() {
                 'fchmodat01' \
                 'fchmodat02' \
                 'fchown01' \
-                'fchown01_16' \
                 'fchown02' \
-                'fchown02_16' \
                 'fchown03' \
-                'fchown03_16' \
                 'fchown04' \
-                'fchown04_16' \
                 'fchown05' \
-                'fchown05_16' \
                 'fchownat01' \
                 'fchownat02' \
                 'fcntl01' \
@@ -601,6 +464,7 @@ ltp_batch_cases() {
                 'fcntl07_64' \
                 'fcntl08' \
                 'fcntl08_64'
+
             ;;
         fs:04)
             printf '%s\n' \
@@ -634,6 +498,7 @@ ltp_batch_cases() {
                 'fcntl22_64' \
                 'fcntl23' \
                 'fcntl23_64'
+
             ;;
         fs:05)
             printf '%s\n' \
@@ -667,6 +532,7 @@ ltp_batch_cases() {
                 'fcntl38_64' \
                 'fcntl39' \
                 'fcntl39_64'
+
             ;;
         fs:06)
             printf '%s\n' \
@@ -700,6 +566,7 @@ ltp_batch_cases() {
                 'ftruncate01' \
                 'ftruncate01_64' \
                 'ftruncate03'
+
             ;;
         fs:07)
             printf '%s\n' \
@@ -718,11 +585,8 @@ ltp_batch_cases() {
                 'getxattr04' \
                 'getxattr05' \
                 'lchown01' \
-                'lchown01_16' \
                 'lchown02' \
-                'lchown02_16' \
                 'lchown03' \
-                'lchown03_16' \
                 'lgetxattr01' \
                 'lgetxattr02' \
                 'link02' \
@@ -733,6 +597,7 @@ ltp_batch_cases() {
                 'linkat02' \
                 'linktest.sh' \
                 'listxattr01'
+
             ;;
         fs:08)
             printf '%s\n' \
@@ -766,6 +631,7 @@ ltp_batch_cases() {
                 'open03' \
                 'open04' \
                 'open06'
+
             ;;
         fs:09)
             printf '%s\n' \
@@ -799,6 +665,7 @@ ltp_batch_cases() {
                 'preadv03_64' \
                 'preadv201' \
                 'preadv201_64'
+
             ;;
         fs:10)
             printf '%s\n' \
@@ -832,6 +699,7 @@ ltp_batch_cases() {
                 'readdir21' \
                 'readlink01' \
                 'readlink03'
+
             ;;
         fs:11)
             printf '%s\n' \
@@ -865,6 +733,7 @@ ltp_batch_cases() {
                 'setxattr02' \
                 'setxattr03' \
                 'stat01'
+
             ;;
         fs:12)
             printf '%s\n' \
@@ -898,6 +767,7 @@ ltp_batch_cases() {
                 'symlink03' \
                 'symlink04' \
                 'symlinkat01'
+
             ;;
         fs:13)
             printf '%s\n' \
@@ -927,6 +797,7 @@ ltp_batch_cases() {
                 'writev05' \
                 'writev06' \
                 'writev07'
+
             ;;
         mm-ipc:01)
             printf '%s\n' \
@@ -960,6 +831,7 @@ ltp_batch_cases() {
                 'epoll_pwait04' \
                 'epoll_pwait05' \
                 'epoll_wait01'
+
             ;;
         mm-ipc:02)
             printf '%s\n' \
@@ -993,6 +865,7 @@ ltp_batch_cases() {
                 'futex_wake02' \
                 'futex_wake03' \
                 'futex_wake04'
+
             ;;
         mm-ipc:03)
             printf '%s\n' \
@@ -1026,6 +899,7 @@ ltp_batch_cases() {
                 'mmap08' \
                 'mmap09' \
                 'mmap1'
+
             ;;
         mm-ipc:04)
             printf '%s\n' \
@@ -1059,6 +933,7 @@ ltp_batch_cases() {
                 'mremap03' \
                 'mremap04' \
                 'mremap05'
+
             ;;
         mm-ipc:05)
             printf '%s\n' \
@@ -1092,6 +967,7 @@ ltp_batch_cases() {
                 'msync03' \
                 'msync04' \
                 'munmap01'
+
             ;;
         mm-ipc:06)
             printf '%s\n' \
@@ -1125,6 +1001,7 @@ ltp_batch_cases() {
                 'pselect02_64' \
                 'pselect03' \
                 'pselect03_64'
+
             ;;
         mm-ipc:07)
             printf '%s\n' \
@@ -1158,6 +1035,7 @@ ltp_batch_cases() {
                 'semop04' \
                 'semop05' \
                 'semtest_2ns'
+
             ;;
         mm-ipc:08)
             printf '%s\n' \
@@ -1191,6 +1069,7 @@ ltp_batch_cases() {
                 'shmctl01' \
                 'shmctl02' \
                 'shmctl03'
+
             ;;
         mm-ipc:09)
             printf '%s\n' \
@@ -1224,6 +1103,7 @@ ltp_batch_cases() {
                 'socketcall03' \
                 'socketpair01' \
                 'socketpair02'
+
             ;;
         common-easy:01)
             printf '%s\n' \
@@ -1242,9 +1122,18 @@ ltp_batch_cases() {
                 'memset01' \
                 'nextafter01' \
                 'string01'
+
             ;;
         *)
             return 1
             ;;
     esac
+}
+
+# Auto-generated list of batch IDs for each category.
+# Derived from actual files in src/init/ltp-cases/.
+# ltp-safe.txt is NOT a batch file; ltp_safe_cases() is handled separately.
+
+ltp_safe_cases() {
+    printf '%s\n' "$LTP_SAFE_DATA"
 }

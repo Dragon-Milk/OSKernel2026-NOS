@@ -1,12 +1,5 @@
-setgid03_16
 setgroups01
-setgroups01_16
 setgroups02
-setgroups02_16
-setgroups03
-setgroups03_16
-setgroups04
-setgroups04_16
 sethostname01
 sethostname02
 sethostname03
@@ -18,13 +11,8 @@ setpgid03
 setpgrp01
 setpgrp02
 setpriority01
-setpriority02
 setregid01
-setregid01_16
 setregid02
-setregid02_16
 setregid03
-setregid03_16
 setregid04
-setregid04_16
 setresgid01

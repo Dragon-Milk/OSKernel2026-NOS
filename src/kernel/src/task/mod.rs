@@ -106,6 +106,30 @@ pub struct Thread {
     /// Linux-compatible realtime priority reported by scheduler syscalls.
     sched_priority: AtomicI32,
 
+    /// Linux SCHED_DEADLINE runtime reported by sched_getattr.
+    sched_runtime: AtomicUsize,
+
+    /// Linux SCHED_DEADLINE deadline reported by sched_getattr.
+    sched_deadline: AtomicUsize,
+
+    /// Linux SCHED_DEADLINE period reported by sched_getattr.
+    sched_period: AtomicUsize,
+
+    /// Linux nice value reported by getpriority/setpriority.
+    nice: AtomicI32,
+
+    /// Linux execution domain reported by personality(2).
+    personality: AtomicUsize,
+
+    /// Signal sent to this process when its parent dies, for prctl(PR_*_PDEATHSIG).
+    parent_death_signal: AtomicU32,
+
+    /// Linux timer slack in nanoseconds reported by prctl(PR_*_TIMERSLACK).
+    timer_slack_ns: AtomicUsize,
+
+    /// Default Linux timer slack used when PR_SET_TIMERSLACK resets with value 0.
+    default_timer_slack_ns: AtomicUsize,
+
     /// The OOM score adjustment value.
     /// OOM 评分调整值。
     oom_score_adj: AtomicI32,
@@ -136,6 +160,14 @@ impl Thread {
             time: AssumeSync(RefCell::new(TimeManager::new())),
             sched_policy: AtomicU32::new(SCHED_NORMAL),
             sched_priority: AtomicI32::new(0),
+            sched_runtime: AtomicUsize::new(0),
+            sched_deadline: AtomicUsize::new(0),
+            sched_period: AtomicUsize::new(0),
+            nice: AtomicI32::new(0),
+            personality: AtomicUsize::new(0),
+            parent_death_signal: AtomicU32::new(0),
+            timer_slack_ns: AtomicUsize::new(50_000),
+            default_timer_slack_ns: AtomicUsize::new(50_000),
             exit: Arc::new(AtomicBool::new(false)),
             oom_score_adj: AtomicI32::new(200),
             accessing_user_memory: AtomicBool::new(false),
@@ -207,6 +239,60 @@ impl Thread {
     pub fn set_sched_param(&self, policy: u32, priority: i32) {
         self.sched_policy.store(policy, Ordering::SeqCst);
         self.sched_priority.store(priority, Ordering::SeqCst);
+    }
+
+    pub fn sched_deadline_params(&self) -> (u64, u64, u64) {
+        (
+            self.sched_runtime.load(Ordering::SeqCst) as u64,
+            self.sched_deadline.load(Ordering::SeqCst) as u64,
+            self.sched_period.load(Ordering::SeqCst) as u64,
+        )
+    }
+
+    pub fn set_sched_deadline_params(&self, runtime: u64, deadline: u64, period: u64) {
+        self.sched_runtime.store(runtime as usize, Ordering::SeqCst);
+        self.sched_deadline.store(deadline as usize, Ordering::SeqCst);
+        self.sched_period.store(period as usize, Ordering::SeqCst);
+    }
+
+    pub fn nice(&self) -> i32 {
+        self.nice.load(Ordering::SeqCst)
+    }
+
+    pub fn set_nice(&self, value: i32) {
+        self.nice.store(value.clamp(-20, 19), Ordering::SeqCst);
+    }
+
+    pub fn personality(&self) -> usize {
+        self.personality.load(Ordering::SeqCst)
+    }
+
+    pub fn set_personality(&self, value: usize) {
+        self.personality.store(value, Ordering::SeqCst);
+    }
+
+    pub fn parent_death_signal(&self) -> u32 {
+        self.parent_death_signal.load(Ordering::SeqCst)
+    }
+
+    pub fn set_parent_death_signal(&self, value: u32) {
+        self.parent_death_signal.store(value, Ordering::SeqCst);
+    }
+
+    pub fn timer_slack_ns(&self) -> usize {
+        self.timer_slack_ns.load(Ordering::SeqCst)
+    }
+
+    pub fn set_timer_slack_ns(&self, value: usize) {
+        self.timer_slack_ns.store(value, Ordering::SeqCst);
+    }
+
+    pub fn default_timer_slack_ns(&self) -> usize {
+        self.default_timer_slack_ns.load(Ordering::SeqCst)
+    }
+
+    pub fn set_default_timer_slack_ns(&self, value: usize) {
+        self.default_timer_slack_ns.store(value, Ordering::SeqCst);
     }
 }
 
@@ -280,6 +366,8 @@ pub struct ProcessData {
     /// Self exit event
     /// 自身退出事件。
     pub exit_event: Arc<PollSet>,
+    /// Job-control stop wait event.
+    pub stopped_event: Arc<PollSet>,
     /// The exit signal of the thread
     /// 线程退出时发送给父进程的信号。
     pub exit_signal: Option<Signo>,
@@ -296,31 +384,50 @@ pub struct ProcessData {
     /// 文件权限默认掩码。
     umask: AtomicU32,
 
-    /// Real/effective/saved user and group IDs.
-    credentials: RwLock<Credentials>,
+    uid: AtomicU32,
+    euid: AtomicU32,
+    suid: AtomicU32,
+    gid: AtomicU32,
+    egid: AtomicU32,
+    sgid: AtomicU32,
+    fsuid: AtomicU32,
+    fsgid: AtomicU32,
+    groups: RwLock<(usize, [u32; 32])>,
+    capabilities: RwLock<Capabilities>,
+    cpu_limit_signal_sent: AtomicBool,
+    did_exec: AtomicBool,
+    child_wait_state: Mutex<ChildWaitState>,
+    uts_state: Mutex<Option<UtsState>>,
+    child_utime_ticks: AtomicUsize,
+    child_stime_ticks: AtomicUsize,
+    times_base_ticks: Mutex<Option<(usize, usize)>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct Credentials {
-    pub real_uid: u32,
-    pub effective_uid: u32,
-    pub saved_uid: u32,
-    pub real_gid: u32,
-    pub effective_gid: u32,
-    pub saved_gid: u32,
-    pub supplementary_groups: Vec<u32>,
+#[derive(Clone, Copy)]
+pub struct Capabilities {
+    pub effective: u32,
+    pub permitted: u32,
+    pub inheritable: u32,
 }
 
-impl Default for Credentials {
+#[derive(Clone, Copy)]
+pub struct UtsState {
+    pub nodename: [core::ffi::c_char; 65],
+    pub domainname: [core::ffi::c_char; 65],
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct ChildWaitState {
+    pub stopped: Option<u8>,
+    pub continued: bool,
+}
+
+impl Default for Capabilities {
     fn default() -> Self {
         Self {
-            real_uid: 0,
-            effective_uid: 0,
-            saved_uid: 0,
-            real_gid: 0,
-            effective_gid: 0,
-            saved_gid: 0,
-            supplementary_groups: Vec::new(),
+            effective: u32::MAX,
+            permitted: u32::MAX,
+            inheritable: u32::MAX,
         }
     }
 }
@@ -347,6 +454,7 @@ impl ProcessData {
 
             child_exit_event: Arc::default(),
             exit_event: Arc::default(),
+            stopped_event: Arc::default(),
             exit_signal,
 
             signal: Arc::new(ProcessSignalManager::new(
@@ -357,7 +465,23 @@ impl ProcessData {
             futex_table: Arc::new(FutexTable::new()),
 
             umask: AtomicU32::new(0o022),
-            credentials: RwLock::new(Credentials::default()),
+            uid: AtomicU32::new(0),
+            euid: AtomicU32::new(0),
+            suid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
+            egid: AtomicU32::new(0),
+            sgid: AtomicU32::new(0),
+            fsuid: AtomicU32::new(0),
+            fsgid: AtomicU32::new(0),
+            groups: RwLock::new((1, [0; 32])),
+            capabilities: RwLock::new(Capabilities::default()),
+            cpu_limit_signal_sent: AtomicBool::new(false),
+            did_exec: AtomicBool::new(false),
+            child_wait_state: Mutex::new(ChildWaitState::default()),
+            uts_state: Mutex::new(None),
+            child_utime_ticks: AtomicUsize::new(0),
+            child_stime_ticks: AtomicUsize::new(0),
+            times_base_ticks: Mutex::new(None),
         })
     }
 
@@ -392,211 +516,163 @@ impl ProcessData {
         self.umask.swap(umask, Ordering::SeqCst)
     }
 
-    pub fn credentials(&self) -> Credentials {
-        self.credentials.read().clone()
+    pub fn ids(&self) -> (u32, u32, u32, u32, u32, u32) {
+        (
+            self.uid.load(Ordering::SeqCst),
+            self.euid.load(Ordering::SeqCst),
+            self.suid.load(Ordering::SeqCst),
+            self.gid.load(Ordering::SeqCst),
+            self.egid.load(Ordering::SeqCst),
+            self.sgid.load(Ordering::SeqCst),
+        )
     }
 
-    pub fn set_credentials(&self, credentials: Credentials) {
-        *self.credentials.write() = credentials;
+    pub fn set_uid(&self, uid: u32) {
+        self.uid.store(uid, Ordering::SeqCst);
+        self.euid.store(uid, Ordering::SeqCst);
+        self.suid.store(uid, Ordering::SeqCst);
+        self.fsuid.store(uid, Ordering::SeqCst);
     }
 
-    pub fn set_uid(&self, uid: u32) -> AxResult<()> {
-        let mut credentials = self.credentials.write();
-        if credentials.effective_uid == 0 {
-            credentials.real_uid = uid;
-            credentials.effective_uid = uid;
-            credentials.saved_uid = uid;
-        } else if uid == credentials.real_uid
-            || uid == credentials.effective_uid
-            || uid == credentials.saved_uid
-        {
-            credentials.effective_uid = uid;
-        } else {
-            return Err(AxError::OperationNotPermitted);
+    pub fn set_gid(&self, gid: u32) {
+        self.gid.store(gid, Ordering::SeqCst);
+        self.egid.store(gid, Ordering::SeqCst);
+        self.sgid.store(gid, Ordering::SeqCst);
+        self.fsgid.store(gid, Ordering::SeqCst);
+    }
+
+    pub fn set_resuid(&self, ruid: Option<u32>, euid: Option<u32>, suid: Option<u32>) {
+        if let Some(ruid) = ruid {
+            self.uid.store(ruid, Ordering::SeqCst);
         }
-        Ok(())
-    }
-
-    pub fn set_gid(&self, gid: u32) -> AxResult<()> {
-        let mut credentials = self.credentials.write();
-        if credentials.effective_uid == 0 {
-            credentials.real_gid = gid;
-            credentials.effective_gid = gid;
-            credentials.saved_gid = gid;
-        } else if gid == credentials.real_gid
-            || gid == credentials.effective_gid
-            || gid == credentials.saved_gid
-        {
-            credentials.effective_gid = gid;
-        } else {
-            return Err(AxError::OperationNotPermitted);
+        if let Some(euid) = euid {
+            self.euid.store(euid, Ordering::SeqCst);
+            self.fsuid.store(euid, Ordering::SeqCst);
         }
-        Ok(())
-    }
-
-    pub fn set_reuid(&self, real_uid: u32, effective_uid: u32) -> AxResult<()> {
-        const UNCHANGED: u32 = u32::MAX;
-
-        let mut credentials = self.credentials.write();
-        let privileged = credentials.effective_uid == 0;
-        let new_real = if real_uid == UNCHANGED {
-            credentials.real_uid
-        } else {
-            real_uid
-        };
-        let new_effective = if effective_uid == UNCHANGED {
-            credentials.effective_uid
-        } else {
-            effective_uid
-        };
-
-        if !privileged {
-            let permitted = |uid| {
-                uid == credentials.real_uid
-                    || uid == credentials.effective_uid
-                    || uid == credentials.saved_uid
-            };
-            if (real_uid != UNCHANGED && !permitted(new_real))
-                || (effective_uid != UNCHANGED && !permitted(new_effective))
-            {
-                return Err(AxError::OperationNotPermitted);
-            }
+        if let Some(suid) = suid {
+            self.suid.store(suid, Ordering::SeqCst);
         }
+    }
 
-        credentials.real_uid = new_real;
-        credentials.effective_uid = new_effective;
-        if privileged && (real_uid != UNCHANGED || effective_uid != UNCHANGED) {
-            credentials.saved_uid = new_effective;
+    pub fn set_resgid(&self, rgid: Option<u32>, egid: Option<u32>, sgid: Option<u32>) {
+        if let Some(rgid) = rgid {
+            self.gid.store(rgid, Ordering::SeqCst);
         }
-        Ok(())
-    }
-
-    pub fn set_resuid(&self, real_uid: u32, effective_uid: u32, saved_uid: u32) -> AxResult<()> {
-        const UNCHANGED: u32 = u32::MAX;
-
-        let mut credentials = self.credentials.write();
-        let privileged = credentials.effective_uid == 0;
-        let new_real = if real_uid == UNCHANGED {
-            credentials.real_uid
-        } else {
-            real_uid
-        };
-        let new_effective = if effective_uid == UNCHANGED {
-            credentials.effective_uid
-        } else {
-            effective_uid
-        };
-        let new_saved = if saved_uid == UNCHANGED {
-            credentials.saved_uid
-        } else {
-            saved_uid
-        };
-
-        if !privileged {
-            let permitted = |uid| {
-                uid == credentials.real_uid
-                    || uid == credentials.effective_uid
-                    || uid == credentials.saved_uid
-            };
-            if (real_uid != UNCHANGED && !permitted(new_real))
-                || (effective_uid != UNCHANGED && !permitted(new_effective))
-                || (saved_uid != UNCHANGED && !permitted(new_saved))
-            {
-                return Err(AxError::OperationNotPermitted);
-            }
+        if let Some(egid) = egid {
+            self.egid.store(egid, Ordering::SeqCst);
+            self.fsgid.store(egid, Ordering::SeqCst);
         }
-
-        credentials.real_uid = new_real;
-        credentials.effective_uid = new_effective;
-        credentials.saved_uid = new_saved;
-        Ok(())
-    }
-
-    pub fn set_resgid(&self, real_gid: u32, effective_gid: u32, saved_gid: u32) -> AxResult<()> {
-        let mut credentials = self.credentials.write();
-        Self::set_resgid_locked(&mut credentials, real_gid, effective_gid, saved_gid)
-    }
-
-    pub fn set_regid(&self, real_gid: u32, effective_gid: u32) -> AxResult<()> {
-        const UNCHANGED: u32 = u32::MAX;
-
-        let mut credentials = self.credentials.write();
-        let new_real = if real_gid == UNCHANGED {
-            credentials.real_gid
-        } else {
-            real_gid
-        };
-        let new_effective = if effective_gid == UNCHANGED {
-            credentials.effective_gid
-        } else {
-            effective_gid
-        };
-        let new_saved = if real_gid != UNCHANGED
-            || (effective_gid != UNCHANGED && new_effective != credentials.real_gid)
-        {
-            new_effective
-        } else {
-            credentials.saved_gid
-        };
-
-        Self::set_resgid_locked(&mut credentials, new_real, new_effective, new_saved)
-    }
-
-    pub fn set_supplementary_groups(&self, groups: Vec<u32>) -> AxResult<()> {
-        let mut credentials = self.credentials.write();
-        if credentials.effective_uid != 0 {
-            return Err(AxError::OperationNotPermitted);
+        if let Some(sgid) = sgid {
+            self.sgid.store(sgid, Ordering::SeqCst);
         }
-        credentials.supplementary_groups = groups;
-        Ok(())
     }
 
-    pub fn has_supplementary_group(&self, gid: u32) -> bool {
-        self.credentials.read().supplementary_groups.contains(&gid)
+    pub fn fsids(&self) -> (u32, u32) {
+        (
+            self.fsuid.load(Ordering::SeqCst),
+            self.fsgid.load(Ordering::SeqCst),
+        )
     }
 
-    fn set_resgid_locked(
-        credentials: &mut Credentials,
-        real_gid: u32,
-        effective_gid: u32,
-        saved_gid: u32,
-    ) -> AxResult<()> {
-        const UNCHANGED: u32 = u32::MAX;
+    pub fn set_fsuid(&self, fsuid: u32) -> u32 {
+        self.fsuid.swap(fsuid, Ordering::SeqCst)
+    }
 
-        let privileged = credentials.effective_uid == 0;
-        let new_real = if real_gid == UNCHANGED {
-            credentials.real_gid
-        } else {
-            real_gid
-        };
-        let new_effective = if effective_gid == UNCHANGED {
-            credentials.effective_gid
-        } else {
-            effective_gid
-        };
-        let new_saved = if saved_gid == UNCHANGED {
-            credentials.saved_gid
-        } else {
-            saved_gid
-        };
+    pub fn set_fsgid(&self, fsgid: u32) -> u32 {
+        self.fsgid.swap(fsgid, Ordering::SeqCst)
+    }
 
-        if !privileged {
-            let permitted = |gid| {
-                gid == credentials.real_gid
-                    || gid == credentials.effective_gid
-                    || gid == credentials.saved_gid
-            };
-            if (real_gid != UNCHANGED && !permitted(new_real))
-                || (effective_gid != UNCHANGED && !permitted(new_effective))
-                || (saved_gid != UNCHANGED && !permitted(new_saved))
-            {
-                return Err(AxError::OperationNotPermitted);
-            }
-        }
+    pub fn groups(&self) -> (usize, [u32; 32]) {
+        *self.groups.read()
+    }
 
-        credentials.real_gid = new_real;
-        credentials.effective_gid = new_effective;
-        credentials.saved_gid = new_saved;
-        Ok(())
+    pub fn set_groups(&self, groups: &[u32]) {
+        let mut stored = [0; 32];
+        stored[..groups.len()].copy_from_slice(groups);
+        *self.groups.write() = (groups.len(), stored);
+    }
+
+    pub fn capabilities(&self) -> Capabilities {
+        *self.capabilities.read()
+    }
+
+    pub fn set_capabilities(&self, capabilities: Capabilities) {
+        *self.capabilities.write() = capabilities;
+    }
+
+    pub fn has_capability(&self, cap: u32) -> bool {
+        cap < 32 && (self.capabilities.read().effective & (1 << cap)) != 0
+    }
+
+    pub fn mark_cpu_limit_signal_sent(&self) -> bool {
+        self.cpu_limit_signal_sent.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn reset_cpu_limit_signal(&self) {
+        self.cpu_limit_signal_sent.store(false, Ordering::SeqCst);
+    }
+
+    pub fn did_exec(&self) -> bool {
+        self.did_exec.load(Ordering::SeqCst)
+    }
+
+    pub fn mark_exec(&self) {
+        self.did_exec.store(true, Ordering::SeqCst);
+    }
+
+    pub fn child_wait_state(&self) -> ChildWaitState {
+        *self.child_wait_state.lock()
+    }
+
+    pub fn mark_stopped(&self, signo: Signo) {
+        let mut state = self.child_wait_state.lock();
+        state.stopped = Some(signo as u8);
+        state.continued = false;
+    }
+
+    pub fn mark_continued(&self) {
+        let mut state = self.child_wait_state.lock();
+        state.stopped = None;
+        state.continued = true;
+        self.stopped_event.wake();
+    }
+
+    pub fn consume_stopped(&self) -> Option<u8> {
+        self.child_wait_state.lock().stopped.take()
+    }
+
+    pub fn consume_continued(&self) -> bool {
+        core::mem::take(&mut self.child_wait_state.lock().continued)
+    }
+
+    pub fn uts_state(&self) -> Option<UtsState> {
+        *self.uts_state.lock()
+    }
+
+    pub fn set_uts_state(&self, uts_state: UtsState) {
+        *self.uts_state.lock() = Some(uts_state);
+    }
+
+    pub fn child_times(&self) -> (usize, usize) {
+        (
+            self.child_utime_ticks.load(Ordering::SeqCst),
+            self.child_stime_ticks.load(Ordering::SeqCst),
+        )
+    }
+
+    pub fn add_child_times(&self, utime_ticks: usize, stime_ticks: usize) {
+        self.child_utime_ticks
+            .fetch_add(utime_ticks.max(1), Ordering::SeqCst);
+        self.child_stime_ticks
+            .fetch_add(stime_ticks.max(1), Ordering::SeqCst);
+    }
+
+    pub fn normalize_times(&self, utime_ticks: usize, stime_ticks: usize) -> (usize, usize) {
+        let mut base = self.times_base_ticks.lock();
+        let (base_utime, base_stime) = *base.get_or_insert((utime_ticks, stime_ticks));
+        (
+            utime_ticks.saturating_sub(base_utime),
+            stime_ticks.saturating_sub(base_stime),
+        )
     }
 }
