@@ -28,8 +28,9 @@ use core::{
     sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering},
 };
 
+use axerrno::{AxError, AxResult};
 use axpoll::PollSet;
-use axsync::{spin::SpinNoIrq, Mutex};
+use axsync::{Mutex, spin::SpinNoIrq};
 use axtask::{TaskExt, TaskInner};
 use extern_trait::extern_trait;
 use linux_raw_sys::general::SCHED_NORMAL;
@@ -37,8 +38,8 @@ use scope_local::{ActiveScope, Scope};
 use spin::RwLock;
 use starry_process::Process;
 use starry_signal::{
-    api::{ProcessSignalManager, SignalActions, ThreadSignalManager},
     Signo,
+    api::{ProcessSignalManager, SignalActions, ThreadSignalManager},
 };
 
 pub use self::{futex::*, ops::*, resources::*, signal::*, stat::*, timer::*, user::*};
@@ -294,6 +295,34 @@ pub struct ProcessData {
     /// The default mask for file permissions.
     /// 文件权限默认掩码。
     umask: AtomicU32,
+
+    /// Real/effective/saved user and group IDs.
+    credentials: RwLock<Credentials>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Credentials {
+    pub real_uid: u32,
+    pub effective_uid: u32,
+    pub saved_uid: u32,
+    pub real_gid: u32,
+    pub effective_gid: u32,
+    pub saved_gid: u32,
+    pub supplementary_groups: Vec<u32>,
+}
+
+impl Default for Credentials {
+    fn default() -> Self {
+        Self {
+            real_uid: 0,
+            effective_uid: 0,
+            saved_uid: 0,
+            real_gid: 0,
+            effective_gid: 0,
+            saved_gid: 0,
+            supplementary_groups: Vec::new(),
+        }
+    }
 }
 
 impl ProcessData {
@@ -328,6 +357,7 @@ impl ProcessData {
             futex_table: Arc::new(FutexTable::new()),
 
             umask: AtomicU32::new(0o022),
+            credentials: RwLock::new(Credentials::default()),
         })
     }
 
@@ -360,5 +390,213 @@ impl ProcessData {
     /// Set the umask and return the old value.
     pub fn replace_umask(&self, umask: u32) -> u32 {
         self.umask.swap(umask, Ordering::SeqCst)
+    }
+
+    pub fn credentials(&self) -> Credentials {
+        self.credentials.read().clone()
+    }
+
+    pub fn set_credentials(&self, credentials: Credentials) {
+        *self.credentials.write() = credentials;
+    }
+
+    pub fn set_uid(&self, uid: u32) -> AxResult<()> {
+        let mut credentials = self.credentials.write();
+        if credentials.effective_uid == 0 {
+            credentials.real_uid = uid;
+            credentials.effective_uid = uid;
+            credentials.saved_uid = uid;
+        } else if uid == credentials.real_uid
+            || uid == credentials.effective_uid
+            || uid == credentials.saved_uid
+        {
+            credentials.effective_uid = uid;
+        } else {
+            return Err(AxError::OperationNotPermitted);
+        }
+        Ok(())
+    }
+
+    pub fn set_gid(&self, gid: u32) -> AxResult<()> {
+        let mut credentials = self.credentials.write();
+        if credentials.effective_uid == 0 {
+            credentials.real_gid = gid;
+            credentials.effective_gid = gid;
+            credentials.saved_gid = gid;
+        } else if gid == credentials.real_gid
+            || gid == credentials.effective_gid
+            || gid == credentials.saved_gid
+        {
+            credentials.effective_gid = gid;
+        } else {
+            return Err(AxError::OperationNotPermitted);
+        }
+        Ok(())
+    }
+
+    pub fn set_reuid(&self, real_uid: u32, effective_uid: u32) -> AxResult<()> {
+        const UNCHANGED: u32 = u32::MAX;
+
+        let mut credentials = self.credentials.write();
+        let privileged = credentials.effective_uid == 0;
+        let new_real = if real_uid == UNCHANGED {
+            credentials.real_uid
+        } else {
+            real_uid
+        };
+        let new_effective = if effective_uid == UNCHANGED {
+            credentials.effective_uid
+        } else {
+            effective_uid
+        };
+
+        if !privileged {
+            let permitted = |uid| {
+                uid == credentials.real_uid
+                    || uid == credentials.effective_uid
+                    || uid == credentials.saved_uid
+            };
+            if (real_uid != UNCHANGED && !permitted(new_real))
+                || (effective_uid != UNCHANGED && !permitted(new_effective))
+            {
+                return Err(AxError::OperationNotPermitted);
+            }
+        }
+
+        credentials.real_uid = new_real;
+        credentials.effective_uid = new_effective;
+        if privileged && (real_uid != UNCHANGED || effective_uid != UNCHANGED) {
+            credentials.saved_uid = new_effective;
+        }
+        Ok(())
+    }
+
+    pub fn set_resuid(&self, real_uid: u32, effective_uid: u32, saved_uid: u32) -> AxResult<()> {
+        const UNCHANGED: u32 = u32::MAX;
+
+        let mut credentials = self.credentials.write();
+        let privileged = credentials.effective_uid == 0;
+        let new_real = if real_uid == UNCHANGED {
+            credentials.real_uid
+        } else {
+            real_uid
+        };
+        let new_effective = if effective_uid == UNCHANGED {
+            credentials.effective_uid
+        } else {
+            effective_uid
+        };
+        let new_saved = if saved_uid == UNCHANGED {
+            credentials.saved_uid
+        } else {
+            saved_uid
+        };
+
+        if !privileged {
+            let permitted = |uid| {
+                uid == credentials.real_uid
+                    || uid == credentials.effective_uid
+                    || uid == credentials.saved_uid
+            };
+            if (real_uid != UNCHANGED && !permitted(new_real))
+                || (effective_uid != UNCHANGED && !permitted(new_effective))
+                || (saved_uid != UNCHANGED && !permitted(new_saved))
+            {
+                return Err(AxError::OperationNotPermitted);
+            }
+        }
+
+        credentials.real_uid = new_real;
+        credentials.effective_uid = new_effective;
+        credentials.saved_uid = new_saved;
+        Ok(())
+    }
+
+    pub fn set_resgid(&self, real_gid: u32, effective_gid: u32, saved_gid: u32) -> AxResult<()> {
+        let mut credentials = self.credentials.write();
+        Self::set_resgid_locked(&mut credentials, real_gid, effective_gid, saved_gid)
+    }
+
+    pub fn set_regid(&self, real_gid: u32, effective_gid: u32) -> AxResult<()> {
+        const UNCHANGED: u32 = u32::MAX;
+
+        let mut credentials = self.credentials.write();
+        let new_real = if real_gid == UNCHANGED {
+            credentials.real_gid
+        } else {
+            real_gid
+        };
+        let new_effective = if effective_gid == UNCHANGED {
+            credentials.effective_gid
+        } else {
+            effective_gid
+        };
+        let new_saved = if real_gid != UNCHANGED
+            || (effective_gid != UNCHANGED && new_effective != credentials.real_gid)
+        {
+            new_effective
+        } else {
+            credentials.saved_gid
+        };
+
+        Self::set_resgid_locked(&mut credentials, new_real, new_effective, new_saved)
+    }
+
+    pub fn set_supplementary_groups(&self, groups: Vec<u32>) -> AxResult<()> {
+        let mut credentials = self.credentials.write();
+        if credentials.effective_uid != 0 {
+            return Err(AxError::OperationNotPermitted);
+        }
+        credentials.supplementary_groups = groups;
+        Ok(())
+    }
+
+    pub fn has_supplementary_group(&self, gid: u32) -> bool {
+        self.credentials.read().supplementary_groups.contains(&gid)
+    }
+
+    fn set_resgid_locked(
+        credentials: &mut Credentials,
+        real_gid: u32,
+        effective_gid: u32,
+        saved_gid: u32,
+    ) -> AxResult<()> {
+        const UNCHANGED: u32 = u32::MAX;
+
+        let privileged = credentials.effective_uid == 0;
+        let new_real = if real_gid == UNCHANGED {
+            credentials.real_gid
+        } else {
+            real_gid
+        };
+        let new_effective = if effective_gid == UNCHANGED {
+            credentials.effective_gid
+        } else {
+            effective_gid
+        };
+        let new_saved = if saved_gid == UNCHANGED {
+            credentials.saved_gid
+        } else {
+            saved_gid
+        };
+
+        if !privileged {
+            let permitted = |gid| {
+                gid == credentials.real_gid
+                    || gid == credentials.effective_gid
+                    || gid == credentials.saved_gid
+            };
+            if (real_gid != UNCHANGED && !permitted(new_real))
+                || (effective_gid != UNCHANGED && !permitted(new_effective))
+                || (saved_gid != UNCHANGED && !permitted(new_saved))
+            {
+                return Err(AxError::OperationNotPermitted);
+            }
+        }
+
+        credentials.real_gid = new_real;
+        credentials.effective_gid = new_effective;
+        credentials.saved_gid = new_saved;
+        Ok(())
     }
 }

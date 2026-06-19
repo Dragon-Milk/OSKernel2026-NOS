@@ -247,6 +247,7 @@ impl ElfLoader {
             .transpose()?;
         if patch_musl_sched_stubs {
             patch_loongarch_musl_sched_stubs(uspace);
+            patch_riscv64_musl_default_stack(uspace);
         }
 
         let entry = VirtAddr::from_usize(
@@ -398,6 +399,34 @@ fn patch_loongarch_musl_sched_stubs(uspace: &mut AddrSpace) {
 
 #[cfg(not(target_arch = "loongarch64"))]
 fn patch_loongarch_musl_sched_stubs(_uspace: &mut AddrSpace) {}
+
+#[cfg(target_arch = "riscv64")]
+fn patch_riscv64_musl_default_stack(uspace: &mut AddrSpace) {
+    const DEFAULT_STACKSIZE_OFFSET: usize = 0xa43f8;
+    const MUSL_DEFAULT_STACKSIZE: usize = 0x2_0000;
+
+    let addr = VirtAddr::from_usize(crate::config::USER_INTERP_BASE + DEFAULT_STACKSIZE_OFFSET);
+    let page = addr.align_down_4k();
+    if uspace
+        .populate_area(page, PAGE_SIZE_4K, MappingFlags::READ)
+        .is_err()
+    {
+        return;
+    }
+
+    let mut current = [0; core::mem::size_of::<usize>()];
+    if uspace.read(addr, &mut current).is_err()
+        || usize::from_ne_bytes(current) != MUSL_DEFAULT_STACKSIZE
+    {
+        return;
+    }
+
+    let stack_size = crate::config::USER_STACK_SIZE.max(MUSL_DEFAULT_STACKSIZE);
+    let _ = uspace.write(addr, &stack_size.to_ne_bytes());
+}
+
+#[cfg(not(target_arch = "riscv64"))]
+fn patch_riscv64_musl_default_stack(_uspace: &mut AddrSpace) {}
 
 fn interp_path(app_path: &str, interp: &str) -> String {
     if FS_CONTEXT.lock().resolve(interp).is_ok() {

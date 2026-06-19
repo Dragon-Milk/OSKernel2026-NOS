@@ -185,6 +185,10 @@ impl Location {
         Arc::ptr_eq(&self.mountpoint, &other.mountpoint) && self.entry.ptr_eq(&other.entry)
     }
 
+    pub fn same_mountpoint(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.mountpoint, &other.mountpoint)
+    }
+
     pub fn is_mountpoint(&self) -> bool {
         self.entry.as_dir().is_ok_and(|it| it.is_mountpoint())
     }
@@ -210,6 +214,14 @@ impl Location {
         })
     }
 
+    pub fn lookup_no_mount(&self, name: &str) -> VfsResult<Self> {
+        Ok(match name {
+            DOT => self.clone(),
+            DOTDOT => self.parent().unwrap_or_else(|| self.clone()),
+            _ => Self::new(self.mountpoint.clone(), self.entry.as_dir()?.lookup(name)?),
+        })
+    }
+
     pub fn create(
         &self,
         name: &str,
@@ -223,7 +235,7 @@ impl Location {
     }
 
     pub fn link(&self, name: &str, node: &Self) -> VfsResult<Self> {
-        if !Arc::ptr_eq(&self.mountpoint, &node.mountpoint) {
+        if !self.same_mountpoint(node) {
             return Err(VfsError::CrossesDevices);
         }
         self.entry

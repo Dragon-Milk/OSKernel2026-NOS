@@ -1,15 +1,16 @@
 use alloc::{
     boxed::Box,
+    collections::BTreeMap,
     sync::{Arc, Weak},
     vec::Vec,
 };
-#[cfg(feature = "times")]
 use core::sync::atomic::{AtomicU8, Ordering};
 use core::{num::NonZeroUsize, ops::Range, task::Context};
 
 use axalloc::{UsageKind, global_allocator};
 use axfs_ng_vfs::{
-    FileNode, Location, NodeFlags, NodePermission, NodeType, VfsError, VfsResult, path::Path,
+    FileNode, FilesystemOps, Location, NodeFlags, NodePermission, NodeType, VfsError, VfsResult,
+    path::Path,
 };
 use axhal::mem::{PhysAddr, VirtAddr, virt_to_phys};
 use axio::{SeekFrom, prelude::*};
@@ -17,7 +18,7 @@ use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
 use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
 use lru::LruCache;
-use spin::RwLock;
+use spin::{Lazy, Mutex as SpinMutex, RwLock};
 
 use super::FsContext;
 
@@ -35,6 +36,8 @@ bitflags::bitflags! {
         const APPEND = 8;
         /// Path-only handle, no actual I/O is permitted.
         const PATH = 16;
+        /// Do not update access time on reads through this open file.
+        const NOATIME = 32;
     }
 }
 
@@ -85,6 +88,7 @@ pub struct OpenOptions {
     directory: bool,
     no_follow: bool,
     direct: bool,
+    no_atime: bool,
     user: Option<(u32, u32)>,
     path: bool,
     node_type: NodeType,
@@ -106,6 +110,7 @@ impl OpenOptions {
             directory: false,
             no_follow: false,
             direct: false,
+            no_atime: false,
             user: None,
             path: false,
             node_type: NodeType::RegularFile,
@@ -165,6 +170,12 @@ impl OpenOptions {
     /// Sets the option to open the file with direct I/O.\
     pub fn direct(&mut self, direct: bool) -> &mut Self {
         self.direct = direct;
+        self
+    }
+
+    /// Sets the option to not update access time on reads.
+    pub fn no_atime(&mut self, no_atime: bool) -> &mut Self {
+        self.no_atime = no_atime;
         self
     }
 
@@ -260,6 +271,9 @@ impl OpenOptions {
                         .with_current_dir(parent)?
                         .try_resolve_symlink(loc, &mut 0)?;
                 }
+                if self.no_follow && !self.path && loc.node_type() == NodeType::Symlink {
+                    return Err(VfsError::FilesystemLoop);
+                }
                 loc
             }
             Err(VfsError::InvalidInput) => {
@@ -283,17 +297,21 @@ impl OpenOptions {
             FileFlags::PATH
         } else {
             FileFlags::empty()
+        } | if self.no_atime {
+            FileFlags::NOATIME
+        } else {
+            FileFlags::empty()
         })
     }
 
     pub(crate) fn is_valid(&self) -> bool {
         if !self.read && !self.write && !self.append {
-            return true;
+            return !self.create && !self.create_new;
         }
         match (self.write, self.append) {
             (true, false) => {}
             (false, false) => {
-                if self.truncate || self.create || self.create_new {
+                if self.truncate {
                     return false;
                 }
             }
@@ -390,6 +408,37 @@ impl CachedFileShared {
     }
 }
 
+pub type CachedFileKey = (usize, u64);
+
+enum CachedFileEntry {
+    Weak(Weak<CachedFileShared>),
+    Strong(Arc<CachedFileShared>),
+}
+
+impl CachedFileEntry {
+    fn get(&self) -> Option<Arc<CachedFileShared>> {
+        match self {
+            Self::Weak(shared) => shared.upgrade(),
+            Self::Strong(shared) => Some(shared.clone()),
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        self.get().is_some()
+    }
+}
+
+static BACKED_FILE_CACHES: Lazy<SpinMutex<BTreeMap<CachedFileKey, CachedFileEntry>>> =
+    Lazy::new(|| SpinMutex::new(BTreeMap::new()));
+
+pub fn cached_file_key(filesystem: &dyn FilesystemOps, inode: u64) -> CachedFileKey {
+    (filesystem as *const dyn FilesystemOps as *const () as usize, inode)
+}
+
+pub fn remove_cached_file(key: CachedFileKey) {
+    BACKED_FILE_CACHES.lock().remove(&key);
+}
+
 /// A file handle with an LRU page cache for buffered I/O.
 pub struct CachedFile {
     inner: Location,
@@ -411,41 +460,42 @@ impl Clone for CachedFile {
     }
 }
 
-enum FileUserData {
-    Weak(Weak<CachedFileShared>),
-    Strong(Arc<CachedFileShared>),
-}
-
-impl FileUserData {
-    pub fn get(&self) -> Option<Arc<CachedFileShared>> {
-        match self {
-            FileUserData::Weak(weak) => weak.upgrade(),
-            FileUserData::Strong(strong) => Some(strong.clone()),
-        }
-    }
-}
-
 impl CachedFile {
+    fn backed_shared(location: &Location, keep_alive: bool) -> Arc<CachedFileShared> {
+        let key = cached_file_key(location.filesystem(), location.inode());
+        let mut guard = BACKED_FILE_CACHES.lock();
+
+        if let Some(shared) = guard.get(&key).and_then(CachedFileEntry::get) {
+            return shared;
+        }
+
+        guard.retain(|_, shared| shared.is_alive());
+
+        let shared = Arc::new(if keep_alive {
+            CachedFileShared::new_unbounded()
+        } else {
+            CachedFileShared::new()
+        });
+        guard.insert(
+            key,
+            if keep_alive {
+                CachedFileEntry::Strong(shared.clone())
+            } else {
+                CachedFileEntry::Weak(Arc::downgrade(&shared))
+            },
+        );
+        shared
+    }
+
     /// Returns an existing cached file for `location`, or creates a new one.
     pub fn get_or_create(location: Location) -> Self {
         let in_memory = location.filesystem().name() == "tmpfs";
 
-        let mut guard = location.user_data();
-        let shared = if let Some(shared) = guard.get::<FileUserData>().and_then(|it| it.get()) {
-            shared
+        let shared = if in_memory {
+            Self::backed_shared(&location, true)
         } else {
-            let (shared, user_data) = if in_memory {
-                let shared = Arc::new(CachedFileShared::new_unbounded());
-                (shared.clone(), FileUserData::Strong(shared))
-            } else {
-                let shared = Arc::new(CachedFileShared::new());
-                let user_data = FileUserData::Weak(Arc::downgrade(&shared));
-                (shared, user_data)
-            };
-            guard.insert(user_data);
-            shared
+            Self::backed_shared(&location, false)
         };
-        drop(guard);
 
         Self {
             inner: location,
@@ -800,7 +850,7 @@ impl FileBackend {
 /// Provides `std::fs::File`-like interface.
 pub struct File {
     inner: FileBackend,
-    flags: FileFlags,
+    flags: AtomicU8,
     position: Option<Mutex<u64>>,
     #[cfg(feature = "times")]
     access_flags: AtomicU8,
@@ -820,7 +870,7 @@ impl File {
         };
         Self {
             inner,
-            flags,
+            flags: AtomicU8::new(flags.bits()),
             position,
             #[cfg(feature = "times")]
             access_flags: AtomicU8::new(0),
@@ -848,7 +898,8 @@ impl File {
 
     /// Checks that the file has the required `flags` and returns the backend.
     pub fn access(&self, flags: FileFlags) -> VfsResult<&FileBackend> {
-        if self.flags.contains(flags) && !self.is_path() {
+        let current = self.flags();
+        if current.contains(flags) && !current.contains(FileFlags::PATH) {
             Ok(&self.inner)
         } else {
             Err(VfsError::BadFileDescriptor)
@@ -857,12 +908,27 @@ impl File {
 
     /// Returns `true` if this is a path-only handle (no I/O permitted).
     pub fn is_path(&self) -> bool {
-        self.flags.contains(FileFlags::PATH)
+        self.flags().contains(FileFlags::PATH)
     }
 
     /// Returns the access flags this file was opened with.
     pub fn flags(&self) -> FileFlags {
-        self.flags
+        FileFlags::from_bits_truncate(self.flags.load(Ordering::Acquire))
+    }
+
+    /// Returns the current file position (0 for streams).
+    pub fn position(&self) -> u64 {
+        self.position.as_ref().map_or(0, |p| *p.lock())
+    }
+
+    /// Sets or clears append mode while preserving access and path flags.
+    pub fn set_append(&self, append: bool) {
+        let append_bit = FileFlags::APPEND.bits();
+        if append {
+            self.flags.fetch_or(append_bit, Ordering::AcqRel);
+        } else {
+            self.flags.fetch_and(!append_bit, Ordering::AcqRel);
+        }
     }
 
     /// Returns a reference to the underlying [`FileBackend`].
@@ -883,7 +949,12 @@ impl File {
 
     /// Writes a number of bytes starting from a given offset.
     pub fn write_at(&self, src: impl Read + IoBuf, offset: u64) -> VfsResult<usize> {
-        self.access(FileFlags::WRITE)?.write_at(src, offset)
+        let inner = self.access(FileFlags::WRITE)?;
+        if self.flags().contains(FileFlags::APPEND) {
+            inner.append(src).map(|(written, _)| written)
+        } else {
+            inner.write_at(src, offset)
+        }
     }
 
     /// Attempts to sync OS-internal file content and metadata to disk.
@@ -899,7 +970,9 @@ impl File {
     pub fn read(&self, dst: impl Write + IoBufMut) -> axio::Result<usize> {
         #[cfg(feature = "times")]
         {
-            self.access_flags.fetch_or(1, Ordering::AcqRel);
+            if !self.flags().contains(FileFlags::NOATIME) {
+                self.access_flags.fetch_or(1, Ordering::AcqRel);
+            }
         }
         if let Some(pos) = self.position.as_ref() {
             let mut pos = pos.lock();

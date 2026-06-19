@@ -31,6 +31,40 @@ LTP_LIBC=${LTP_LIBC:-both}
 echo "[init] TEST_PROFILE=$TEST_PROFILE"
 echo "[init] LTP_CATEGORY=$LTP_CATEGORY LTP_BATCH=$LTP_BATCH LTP_LIBC=$LTP_LIBC"
 
+entry_name_exists() {
+    file="$1"
+    name="$2"
+
+    [ -f "$file" ] || return 1
+    while IFS=: read entry rest || [ -n "$entry" ]; do
+        [ "$entry" = "$name" ] && return 0
+    done < "$file"
+    return 1
+}
+
+ensure_named_entry() {
+    file="$1"
+    name="$2"
+    line="$3"
+
+    entry_name_exists "$file" "$name" && return
+    printf '%s\n' "$line" >> "$file"
+}
+
+ensure_user_database() {
+    mkdir -p /etc || return
+    [ -f /etc/passwd ] || : > /etc/passwd
+    [ -f /etc/group ] || : > /etc/group
+
+    ensure_named_entry /etc/passwd root 'root:x:0:0:root:/root:/bin/sh'
+    ensure_named_entry /etc/passwd nobody 'nobody:x:65534:65534:nobody:/:/sbin/nologin'
+    ensure_named_entry /etc/group root 'root:x:0:'
+    ensure_named_entry /etc/group daemon 'daemon:x:1:'
+    ensure_named_entry /etc/group nobody 'nobody:x:65534:'
+}
+
+ensure_user_database
+
 run_with_shell() {
     script="$1"
 

@@ -1,9 +1,12 @@
+use alloc::vec::Vec;
 use core::mem::{self, MaybeUninit};
 
 use axerrno::{AxError, AxResult};
 use axio::prelude::*;
 use bytemuck::AnyBitPattern;
-use starry_vm::{VmPtr, vm_read_slice, vm_write_slice};
+use starry_vm::{vm_read_slice, vm_write_slice};
+
+use super::{UserConstPtr, UserPtr};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, AnyBitPattern)]
@@ -14,7 +17,7 @@ pub struct IoVec {
 
 #[derive(Default)]
 pub struct IoVectorBuf {
-    iovs: *const IoVec,
+    iovs: Vec<IoVec>,
     iovcnt: usize,
     len: usize,
 }
@@ -24,15 +27,51 @@ impl IoVectorBuf {
         if iovcnt > 1024 {
             return Err(AxError::InvalidInput);
         }
-        let mut len = 0;
-        for i in 0..iovcnt {
-            let iov = iovs.wrapping_add(i).vm_read()?;
+
+        let iovs = if iovcnt == 0 {
+            &[]
+        } else {
+            UserConstPtr::<IoVec>::from(iovs).get_as_slice(iovcnt)?
+        };
+
+        let mut len: usize = 0;
+        let mut copied = Vec::with_capacity(iovcnt);
+        for &iov in iovs {
             if iov.iov_len < 0 {
                 return Err(AxError::InvalidInput);
             }
-            len += iov.iov_len as usize;
+            len = len
+                .checked_add(iov.iov_len as usize)
+                .filter(|len| *len <= isize::MAX as usize)
+                .ok_or(AxError::InvalidInput)?;
+            copied.push(iov);
         }
-        Ok(Self { iovs, iovcnt, len })
+        Ok(Self {
+            iovs: copied,
+            iovcnt,
+            len,
+        })
+    }
+
+    pub fn validate_readable(&self) -> AxResult<()> {
+        for iov in &self.iovs {
+            if iov.iov_len == 0 {
+                continue;
+            }
+            UserConstPtr::<u8>::from(iov.iov_base as *const u8)
+                .get_as_slice(iov.iov_len as usize)?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_writable(&self) -> AxResult<()> {
+        for iov in &self.iovs {
+            if iov.iov_len == 0 {
+                continue;
+            }
+            UserPtr::<u8>::from(iov.iov_base).get_as_mut_slice(iov.iov_len as usize)?;
+        }
+        Ok(())
     }
 
     pub fn read_with(
@@ -40,8 +79,7 @@ impl IoVectorBuf {
         mut f: impl FnMut(*const u8, usize) -> AxResult<usize>,
     ) -> AxResult<usize> {
         let mut count = 0;
-        for i in 0..self.iovcnt {
-            let iov = self.iovs.wrapping_add(i).vm_read()?;
+        for iov in self.iovs {
             if iov.iov_len == 0 {
                 continue;
             }
@@ -59,8 +97,7 @@ impl IoVectorBuf {
         mut f: impl FnMut(*mut u8, usize) -> AxResult<usize>,
     ) -> AxResult<usize> {
         let mut count = 0;
-        for i in 0..self.iovcnt {
-            let iov = self.iovs.wrapping_add(i).vm_read()?;
+        for iov in self.iovs {
             if iov.iov_len == 0 {
                 continue;
             }
@@ -91,7 +128,7 @@ pub struct IoVectorBufIo {
 impl IoVectorBufIo {
     fn skip_empty(&mut self) -> AxResult<()> {
         while self.start < self.inner.iovcnt {
-            let iov = self.inner.iovs.wrapping_add(self.start).vm_read()?;
+            let iov = self.inner.iovs[self.start];
             if iov.iov_len as usize > self.offset {
                 break;
             }
@@ -110,7 +147,7 @@ impl Read for IoVectorBufIo {
             if self.start >= self.inner.iovcnt {
                 break;
             }
-            let iov = self.inner.iovs.wrapping_add(self.start).vm_read()?;
+            let iov = self.inner.iovs[self.start];
             let len = (iov.iov_len as usize - self.offset).min(buf.len() - count);
             if len == 0 {
                 break;
@@ -134,7 +171,7 @@ impl Write for IoVectorBufIo {
             if self.start >= self.inner.iovcnt {
                 break;
             }
-            let iov = self.inner.iovs.wrapping_add(self.start).vm_read()?;
+            let iov = self.inner.iovs[self.start];
             let len = (iov.iov_len as usize - self.offset).min(buf.len() - count);
             if len == 0 {
                 break;

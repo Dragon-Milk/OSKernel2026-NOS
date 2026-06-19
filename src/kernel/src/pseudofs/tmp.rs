@@ -6,6 +6,7 @@ use axfs_ng_vfs::{
     FilesystemOps, Metadata, MetadataUpdate, NodeFlags, NodeOps, NodePermission, NodeType,
     Reference, StatFs, VfsError, VfsResult, WeakDirEntry,
 };
+use axfs::{cached_file_key, remove_cached_file};
 use axpoll::{IoEvents, Pollable};
 use axsync::Mutex;
 use hashbrown::HashMap;
@@ -53,6 +54,7 @@ impl Borrow<str> for FileName {
 /// A simple in-memory filesystem that supports basic file operations.
 pub struct MemoryFs {
     inodes: Mutex<Slab<Arc<Inode>>>,
+    mount_flags: Mutex<u32>,
     root: Mutex<Option<DirEntry>>,
 }
 
@@ -62,6 +64,7 @@ impl MemoryFs {
     pub fn new() -> Filesystem {
         let fs = Arc::new(Self {
             inodes: Mutex::new(Slab::new()),
+            mount_flags: Mutex::new(0),
             root: Mutex::default(),
         });
         let root_ino = Inode::new(
@@ -92,7 +95,14 @@ impl FilesystemOps for MemoryFs {
     }
 
     fn stat(&self) -> VfsResult<StatFs> {
-        Ok(dummy_stat_fs(0x01021994))
+        let mut stat = dummy_stat_fs(0x01021994);
+        stat.mount_flags = *self.mount_flags.lock();
+        Ok(stat)
+    }
+
+    fn set_mount_flags(&self, flags: u32) -> VfsResult<()> {
+        *self.mount_flags.lock() = flags;
+        Ok(())
     }
 }
 
@@ -100,8 +110,11 @@ fn release_inode(fs: &MemoryFs, inode: &Arc<Inode>, nlink: u64) {
     let mut inodes = fs.inodes.lock();
     let mut metadata = inode.metadata.lock();
     metadata.nlink -= nlink;
-    if metadata.nlink == 0 && Arc::strong_count(inode) == 2 {
-        inodes.remove(metadata.inode as usize - 1);
+    if metadata.nlink == 0 {
+        remove_cached_file(cached_file_key(fs, metadata.inode));
+        if Arc::strong_count(inode) == 2 {
+            inodes.remove(metadata.inode as usize - 1);
+        }
     }
 }
 

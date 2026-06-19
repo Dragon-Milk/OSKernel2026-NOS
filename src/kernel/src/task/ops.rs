@@ -18,6 +18,7 @@ use super::{
     futex_table_for, send_signal_thread_inner, send_signal_to_process, send_signal_to_thread,
     AsThread, FutexKey, ProcessData, TimerState,
 };
+use crate::file::record_lock;
 
 static TASK_TABLE: RwLock<WeakMap<Pid, WeakAxTaskRef>> = RwLock::new(WeakMap::new());
 
@@ -219,6 +220,10 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
     {
         warn!("exit robust list failed: {err:?}");
     }
+
+    // Release all POSIX record locks held by this process.
+    let owner = Arc::downgrade(&thr.proc_data);
+    record_lock::release_all_posix_locks(&owner);
 
     let process = &thr.proc_data.proc;
     if process.exit_thread(curr.id().as_u64() as Pid, exit_code) {

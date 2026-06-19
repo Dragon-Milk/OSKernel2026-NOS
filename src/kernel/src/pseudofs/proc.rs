@@ -365,6 +365,16 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         }),
     );
     root.add(
+        "cpuinfo",
+        SimpleFile::new_regular(fs.clone(), || {
+            Ok("processor\t: 0\n\
+                hart\t\t: 0\n\
+                isa\t\t: rv64imafdc\n\
+                mmu\t\t: sv39\n\
+                uarch\t\t: sifive,u74-mc\n\n")
+        }),
+    );
+    root.add(
         "meminfo",
         SimpleFile::new_regular(fs.clone(), || Ok(DUMMY_MEMINFO)),
     );

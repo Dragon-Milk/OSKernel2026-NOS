@@ -26,6 +26,7 @@ temp/
 .claude/
 **/.claude/
 workflow/
+REASONIX.md
 
 # target
 kernel-rv
