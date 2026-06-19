@@ -234,7 +234,7 @@ fn open_create_metadata(
     })
 }
 
-fn check_open_permission(loc: &Location, flags: i32, uid: u32, gid: u32) -> AxResult<()> {
+fn check_open_file_permission(loc: &Location, flags: i32, uid: u32, gid: u32) -> AxResult<()> {
     if uid == 0 || flags as u32 & O_PATH != 0 {
         return Ok(());
     }
@@ -390,7 +390,7 @@ pub fn sys_openat(
         .and_then(|it| {
             match &it {
                 OpenResult::File(file) => {
-                    check_open_permission(file.location(), flags, fsuid, fsgid)?
+                    check_open_file_permission(file.location(), flags, fsuid, fsgid)?
                 }
                 OpenResult::Dir(_) => {}
             }

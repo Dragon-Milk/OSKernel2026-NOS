@@ -19,6 +19,8 @@
 .local-toolchains/
 logs/
 temp/
+REASONIX.md
+resonix.toml
 
 # workflow
 .codex/
