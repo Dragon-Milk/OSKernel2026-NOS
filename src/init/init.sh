@@ -238,6 +238,19 @@ run_test_path() {
     cd /
 }
 
+prepare_basic_scripts() {
+    for dir in /glibc /musl; do
+        [ -x "$dir/busybox" ] || continue
+
+        echo "[full-safe] prepare basic scripts: $dir"
+        "$dir/busybox" chmod +x "$dir/basic/run-all.sh" "$dir"/basic/test_* 2>/dev/null || true
+
+        if [ ! -x "$dir/basic/run-all.sh" ]; then
+            echo "[full-safe] warning: $dir/basic/run-all.sh is still not executable"
+        fi
+    done
+}
+
 run_all_non_ltp_testcode_tests() {
     # Scan / /glibc /musl for *_testcode.sh, skip ltp_testcode.sh and test_all.sh.
     for dir in / /glibc /musl; do
@@ -727,6 +740,7 @@ case "$TEST_PROFILE" in
         done
         ;;
     full-safe)
+        prepare_basic_scripts
         run_all_non_ltp_testcode_tests
         run_ltp_safe_tests
         ;;
