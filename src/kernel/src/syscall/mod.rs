@@ -9,6 +9,7 @@ mod sync;
 mod sys;
 mod task;
 mod time;
+mod unsupported;
 
 use axerrno::{AxError, LinuxError};
 use axhal::uspace::UserContext;
@@ -18,7 +19,7 @@ use syscalls::Sysno;
 
 pub use self::{
     fs::*, io_mpx::*, ipc::*, mm::*, net::*, resources::*, signal::*, sync::*, sys::*, task::*,
-    time::*,
+    time::*, unsupported::*,
 };
 use crate::task::AsThread;
 
@@ -496,6 +497,22 @@ pub fn handle_syscall(uctx: &mut UserContext) {
         Sysno::mlock => sys_mlock(uctx.arg0(), uctx.arg1() as _),
         Sysno::mlock2 => sys_mlock2(uctx.arg0(), uctx.arg1() as _, uctx.arg2() as _),
         Sysno::mlockall => sys_mlockall(uctx.arg0() as _),
+        Sysno::process_vm_readv => sys_process_vm_readv(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4() as _,
+            uctx.arg5() as _,
+        ),
+        Sysno::process_vm_writev => sys_process_vm_writev(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4() as _,
+            uctx.arg5() as _,
+        ),
 
         // task info
         Sysno::getpid => sys_getpid(),
@@ -583,13 +600,12 @@ pub fn handle_syscall(uctx: &mut UserContext) {
         Sysno::getresuid => sys_getresuid(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         Sysno::setresgid => sys_setresgid(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         Sysno::getresgid => sys_getresgid(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
-        Sysno::get_mempolicy => sys_get_mempolicy(
-            uctx.arg0() as _,
-            uctx.arg1() as _,
-            uctx.arg2() as _,
-            uctx.arg3() as _,
-            uctx.arg4() as _,
-        ),
+        Sysno::get_mempolicy
+        | Sysno::mbind
+        | Sysno::set_mempolicy
+        | Sysno::migrate_pages
+        | Sysno::move_pages
+        | Sysno::set_mempolicy_home_node => sys_unsupported_feature(sysno),
 
         // task management
         Sysno::clone => sys_clone(
@@ -811,11 +827,14 @@ pub fn handle_syscall(uctx: &mut UserContext) {
         | Sysno::userfaultfd
         | Sysno::perf_event_open
         | Sysno::io_uring_setup
-        | Sysno::bpf
         | Sysno::fsopen
         | Sysno::fspick
         | Sysno::open_tree
         | Sysno::memfd_secret => sys_dummy_fd(sysno),
+
+        Sysno::bpf | Sysno::add_key | Sysno::request_key | Sysno::keyctl => {
+            sys_unsupported_feature(sysno)
+        }
 
         Sysno::timer_create => {
             sys_timer_create(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _)

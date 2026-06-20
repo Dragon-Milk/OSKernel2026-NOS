@@ -18,7 +18,7 @@ use syscalls::Sysno;
 
 use crate::{
     file::{
-        AccessMode, Directory, File, FileLike, NamedPipe, Pipe, Socket, VfsCredentials,
+        AccessMode, Directory, File, FileLike, MemFd, NamedPipe, Pipe, Socket, VfsCredentials,
         check_not_append_only, check_not_immutable,
         check_permission, check_writable_filesystem, get_file_like,
     },
@@ -144,6 +144,13 @@ pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> AxRes
 pub fn sys_ftruncate(fd: c_int, length: __kernel_off_t) -> AxResult<isize> {
     debug!("sys_ftruncate <= {fd} {length}");
     let file_like = get_file_like(fd)?;
+    if let Some(memfd) = file_like.downcast_ref::<MemFd>() {
+        if length < 0 {
+            return Err(AxError::InvalidInput);
+        }
+        memfd.set_len(length as u64)?;
+        return Ok(0);
+    }
     let Some(f) = file_like.downcast_ref::<File>() else {
         return Err(AxError::InvalidInput);
     };
@@ -178,6 +185,13 @@ pub fn sys_fallocate(
     debug!("sys_fallocate <= fd: {fd}, mode: {mode}, offset: {offset}, len: {len}");
     if mode != 0 {
         return Err(AxError::InvalidInput);
+    }
+    if let Ok(memfd) = MemFd::from_fd(fd) {
+        if offset < 0 || len < 0 {
+            return Err(AxError::InvalidInput);
+        }
+        memfd.set_len((offset as u64).saturating_add(len as u64))?;
+        return Ok(0);
     }
     let f = File::from_fd(fd)?;
     let inner = f.inner();

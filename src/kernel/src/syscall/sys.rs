@@ -188,7 +188,7 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> AxResult<isize> {
     if len == 0 {
         return Ok(0);
     }
-    let flags = GetRandomFlags::from_bits_retain(flags);
+    let flags = GetRandomFlags::from_bits(flags).ok_or(AxError::InvalidInput)?;
 
     debug!("sys_getrandom <= buf: {buf:p}, len: {len}, flags: {flags:?}");
 

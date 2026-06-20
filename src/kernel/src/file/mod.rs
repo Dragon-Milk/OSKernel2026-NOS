@@ -1,6 +1,7 @@
 pub mod epoll;
 pub mod event;
 mod fs;
+mod memfd;
 mod net;
 mod pidfd;
 mod pipe;
@@ -33,6 +34,7 @@ pub use self::{
         check_permission, check_writable_filesystem, clear_setgid_if_not_in_group,
         creation_metadata, resolve_at, mark_directory_deleted, is_directory_deleted, with_fs, with_fs_at,
     },
+    memfd::MemFd,
     net::Socket,
     pidfd::PidFd,
     pipe::{NamedPipe, Pipe, PIPE_MAX_SIZE},

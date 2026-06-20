@@ -19,7 +19,7 @@ use spin::RwLock;
 
 use crate::{
     file::{
-        AccessMode, Directory, FD_TABLE, File, FileLike, FileOwnerEx, NamedPipe, Pipe,
+        AccessMode, Directory, FD_TABLE, File, FileLike, FileOwnerEx, MemFd, NamedPipe, Pipe,
         PIPE_MAX_SIZE, VfsCredentials, add_file_like, add_file_like_from,
         check_not_append_only, check_not_immutable,
         check_parent_permission, check_path_search, check_permission,
@@ -676,6 +676,23 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> AxResult<isize> {
 
         // --- Lease (F_GETLEASE) ---
         F_GETLEASE => Ok(F_RDLCK as _),
+
+        F_ADD_SEALS => {
+            let memfd = descriptor
+                .inner
+                .downcast_ref::<MemFd>()
+                .ok_or(AxError::InvalidInput)?;
+            memfd.add_seals(arg as u32)?;
+            Ok(0)
+        }
+
+        F_GET_SEALS => {
+            let memfd = descriptor
+                .inner
+                .downcast_ref::<MemFd>()
+                .ok_or(AxError::InvalidInput)?;
+            Ok(memfd.seals() as _)
+        }
 
         // --- Owner-ex (F_GETOWN_EX) ---
         F_GETOWN_EX => {
