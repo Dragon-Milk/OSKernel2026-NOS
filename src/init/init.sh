@@ -23,7 +23,7 @@ export PATH=$BASE_PATH
 # unixbench     : run glibc and musl unixbench only
 # wait-repro    : run wait/libctest/lmbench/unixbench repro
 # full          : scan and run all testcode scripts
-# full-safe     : run all non-LTP testcode scripts plus LTP safe whitelist from ltp-safe.txt
+# full-safe     : run stable profile plus LTP safe whitelist from ltp-safe.txt
 # ============================================================
 SKIP_LTP=${SKIP_LTP:-0}
 TEST_PROFILE=${TEST_PROFILE:-ltp-batch}
@@ -255,6 +255,18 @@ run_all_non_ltp_testcode_tests() {
             run_test_path "$testcase"
         done
     done
+}
+
+prepare_stable_test_env() {
+    if [ -x /glibc/busybox ]; then
+        /glibc/busybox chmod +x /glibc/basic/run-all.sh /glibc/basic/test_* 2>/dev/null || true
+        /glibc/busybox ln -sf busybox /glibc/ls 2>/dev/null || true
+    fi
+
+    if [ -x /musl/busybox ]; then
+        /musl/busybox chmod +x /musl/basic/run-all.sh /musl/basic/test_* 2>/dev/null || true
+        /musl/busybox ln -sf busybox /musl/ls 2>/dev/null || true
+    fi
 }
 
 run_stable_tests() {
@@ -727,7 +739,8 @@ case "$TEST_PROFILE" in
         done
         ;;
     full-safe)
-        run_all_non_ltp_testcode_tests
+        prepare_stable_test_env
+        run_stable_tests
         run_ltp_safe_tests
         ;;
     *)
