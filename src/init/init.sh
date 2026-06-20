@@ -634,7 +634,7 @@ run_ltp_batch_tests() {
     found=1
 
     case "$LTP_CATEGORY" in
-        process|fs|mm-ipc|common-easy) ;;
+        process|fs|mm-ipc|common-easy|storage) ;;
         *)
             echo "[LTP-BATCH-ERROR] unsupported category: $LTP_CATEGORY"
             return
