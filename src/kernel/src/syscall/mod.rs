@@ -810,7 +810,6 @@ pub fn handle_syscall(uctx: &mut UserContext) {
 
         // dummy fds
         Sysno::fanotify_init
-        | Sysno::inotify_init1
         | Sysno::userfaultfd
         | Sysno::perf_event_open
         | Sysno::io_uring_setup
@@ -819,6 +818,8 @@ pub fn handle_syscall(uctx: &mut UserContext) {
         | Sysno::fspick
         | Sysno::open_tree
         | Sysno::memfd_secret => sys_dummy_fd(sysno),
+
+        Sysno::inotify_init1 => sys_inotify_init1(uctx.arg0() as _),
 
         Sysno::timer_create => {
             sys_timer_create(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _)

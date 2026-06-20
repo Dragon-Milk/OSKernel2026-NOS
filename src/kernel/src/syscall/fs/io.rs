@@ -1,6 +1,7 @@
 use alloc::{borrow::Cow, sync::Arc, vec};
 use core::{
     ffi::{c_char, c_int},
+    sync::atomic::{AtomicBool, Ordering},
     task::Context,
 };
 
@@ -10,8 +11,8 @@ use axio::{Seek, SeekFrom};
 use axpoll::{IoEvents, Pollable};
 use axtask::current;
 use linux_raw_sys::general::{
-    __kernel_off_t, RLIM64_INFINITY, RLIMIT_FSIZE, RWF_APPEND, RWF_DSYNC, RWF_HIPRI, RWF_NOWAIT,
-    RWF_SYNC,
+    __kernel_off_t, IN_CLOEXEC, IN_NONBLOCK, RLIM64_INFINITY, RLIMIT_FSIZE, RWF_APPEND, RWF_DSYNC,
+    RWF_HIPRI, RWF_NOWAIT, RWF_SYNC,
 };
 use starry_vm::{VmMutPtr, VmPtr};
 use syscalls::Sysno;
@@ -27,10 +28,21 @@ use crate::{
     task::AsThread,
 };
 
-struct DummyFd;
+struct DummyFd {
+    nonblocking: AtomicBool,
+}
 impl FileLike for DummyFd {
     fn path(&self) -> Cow<'_, str> {
         "anon_inode:[dummy]".into()
+    }
+
+    fn nonblocking(&self) -> bool {
+        self.nonblocking.load(Ordering::Relaxed)
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> AxResult {
+        self.nonblocking.store(nonblocking, Ordering::Relaxed);
+        Ok(())
     }
 }
 impl Pollable for DummyFd {
@@ -48,7 +60,32 @@ pub fn sys_dummy_fd(sysno: Sysno) -> AxResult<isize> {
         return Err(AxError::Unsupported);
     }
     warn!("Dummy fd created: {sysno}");
-    DummyFd.add_to_fd_table(false).map(|fd| fd as isize)
+    DummyFd {
+        nonblocking: AtomicBool::new(false),
+    }
+    .add_to_fd_table(false)
+    .map(|fd| fd as isize)
+}
+
+/// inotify_init1(flags) — create a dummy inotify fd with proper flag handling.
+///
+/// Supported flags: `IN_CLOEXEC`, `IN_NONBLOCK`.
+pub fn sys_inotify_init1(flags: u32) -> AxResult<isize> {
+    debug!("sys_inotify_init1 <= flags: {flags}");
+    const VALID_FLAGS: u32 = IN_CLOEXEC | IN_NONBLOCK;
+    if flags & !VALID_FLAGS != 0 {
+        return Err(AxError::InvalidInput);
+    }
+    if current().name().starts_with("qemu-") {
+        // We need to be honest to qemu, since it can automatically fallback to
+        // other strategies.
+        return Err(AxError::Unsupported);
+    }
+    let f = DummyFd {
+        nonblocking: AtomicBool::new(flags & IN_NONBLOCK != 0),
+    };
+    f.add_to_fd_table(flags & IN_CLOEXEC != 0)
+        .map(|fd| fd as isize)
 }
 
 /// Read data from the file indicated by `fd`.
@@ -111,6 +148,10 @@ fn check_pipe_offset_io(fd: c_int) -> AxResult<()> {
 
 pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> AxResult<isize> {
     debug!("sys_lseek <= {fd} {offset} {whence}");
+    // Negative offset with SEEK_SET is invalid (Linux returns EINVAL).
+    if whence == 0 && offset < 0 {
+        return Err(AxError::InvalidInput);
+    }
     let pos = match whence {
         0 => SeekFrom::Start(offset as _),
         1 => SeekFrom::Current(offset as _),
@@ -225,8 +266,10 @@ pub fn sys_fadvise64(
     advice: u32,
 ) -> AxResult<isize> {
     debug!("sys_fadvise64 <= fd: {fd}, offset: {offset}, len: {len}, advice: {advice}");
+    // Validate fd first (LTP posix_fadvise02: invalid fd → EBADF).
+    let _ = get_file_like(fd)?;
     if Pipe::from_fd(fd).is_ok() {
-        return Err(AxError::BrokenPipe);
+        return Err(AxError::from(LinuxError::ESPIPE));
     }
     if advice > 5 {
         return Err(AxError::InvalidInput);
@@ -452,7 +495,14 @@ pub fn sys_sendfile(out_fd: c_int, in_fd: c_int, offset: *mut u64, len: usize) -
         SendFile::Direct(get_file_like(in_fd)?)
     };
 
-    let dst = SendFile::Direct(get_file_like(out_fd)?);
+    // out_fd must be writable (LTP sendfile03: read-only out_fd → EBADF).
+    let out_f = get_file_like(out_fd)?;
+    if let Some(file) = out_f.downcast_ref::<File>() {
+        if !file.inner().flags().contains(FileFlags::WRITE) {
+            return Err(AxError::BadFileDescriptor);
+        }
+    }
+    let dst = SendFile::Direct(out_f);
 
     do_send(src, dst, len).map(|n| n as _)
 }
