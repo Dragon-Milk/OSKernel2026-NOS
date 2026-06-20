@@ -21,6 +21,7 @@ fn main() {
         concat!("LTP_BATCH=", env!("LTP_BATCH")),
         concat!("LTP_LIBC=", env!("LTP_LIBC")),
         concat!("LTP_TIMEOUT=", env!("LTP_TIMEOUT")),
+        concat!("NS_DURATION=", env!("NS_DURATION")),
     ];
 
     starry_kernel::entry::init(CMDLINES, &envs);

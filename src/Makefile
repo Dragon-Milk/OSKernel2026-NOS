@@ -18,6 +18,7 @@ export LTP_CATEGORY ?= net-all
 export LTP_BATCH ?= all
 export LTP_LIBC ?= both
 export LTP_TIMEOUT ?= 30
+export NS_DURATION ?= 3600
 
 # Generated Options
 export A := $(CURDIR)

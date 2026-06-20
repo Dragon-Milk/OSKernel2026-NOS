@@ -47,7 +47,7 @@ busybox_cmd() {
 }
 
 LTP_TOOL_DIR=/tmp/ltp-bin
-LTP_TOOL_COMMANDS="sh rsh ssh rcp scp ip wc mktemp head setkey cut awk cat rm grep sed expr printf locale basename dirname id pkill busybox"
+LTP_TOOL_COMMANDS="sh rsh ssh rcp scp ip wc mktemp head setkey cut awk cat rm grep fgrep sed expr printf locale basename dirname id pkill date ps ifconfig tc busybox"
 
 ltp_busybox_cmd() {
     libc="$1"
@@ -270,6 +270,22 @@ ltp_tool_test() {
             ;;
         busybox)
             "$exe" true >/dev/null 2>&1
+            ;;
+        date)
+            "$exe" '+%s' >/dev/null 2>&1
+            ;;
+        ps)
+            "$exe" >/dev/null 2>&1
+            ;;
+        fgrep)
+            out="$(printf 'abc\n' | "$exe" abc 2>/dev/null)" || return 1
+            [ "$out" = "abc" ]
+            ;;
+        ifconfig)
+            "$exe" lo >/dev/null 2>&1
+            ;;
+        tc)
+            "$exe" qdisc show >/dev/null 2>&1
             ;;
         *)
             "$exe" --help >/dev/null 2>&1
@@ -1699,7 +1715,7 @@ done >"$path" <<'MINIRSH_EOF'
 
 export LHOST RHOST LHOST_IFACES RHOST_IFACES LHOST_HWADDRS RHOST_HWADDRS
 export IPV4_LHOST IPV4_RHOST IPV6_LHOST IPV6_RHOST
-export LTP_CURRENT_LIBC LTP_SHELL_SUPPORTS_SET_U LTP_SHELL_COMPAT PATH
+export LTP_CURRENT_LIBC LTP_SHELL_SUPPORTS_SET_U LTP_SHELL_COMPAT PATH NS_DURATION
 
 minirsh_hostname() {
     if [ -r /proc/sys/kernel/hostname ]; then
@@ -1770,9 +1786,48 @@ done
 host="$1"
 shift
 
-[ "$#" -gt 0 ] || { echo "[MINIRSH-UNSUPPORTED] host=$host cmd=" >&2; exit 95; }
+[ "$#" -gt 0 ] || { echo "[MINIRSH-ERROR] host=$host cmd=" >&2; exit 95; }
 
 if minirsh_is_local "$host"; then
+    # Normalize sh -c "…" calls so the inner shell is our compat wrapper.
+    case "$1" in
+        sh|/bin/sh|/tmp/ltp-bin/sh)
+            if [ "$2" = "-c" ] && [ "$#" -ge 3 ]; then
+                shift 2
+                exec /tmp/ltp-bin/sh -c "$*"
+            fi
+            ;;
+    esac
+
+    if [ "$#" -eq 1 ]; then
+        # Single argument: the old LTP ns-tools convention passes a complete
+        # shell command inside single quotes (redirects, variables, pipes).
+        exec /tmp/ltp-bin/sh -c "$1"
+    fi
+
+    # Multiple arguments: check whether any argument contains shell
+    # metacharacters that exec "$@" would misinterpret.
+    _mrsh_meta=0
+    for _mrsh_a in "$@"; do
+        case "$_mrsh_a" in
+            *';'*|*'&&'*|*'||'*|*'|'*|*'>'*|*'<'*|*'$'*|*'*'*|*'('*|*')'*)
+                _mrsh_meta=1; break ;;
+        esac
+    done
+
+    if [ "$_mrsh_meta" -eq 1 ]; then
+        # Rebuild a single shell command string and run through sh -c.
+        _mrsh_cmd=
+        for _mrsh_a in "$@"; do
+            if [ -z "$_mrsh_cmd" ]; then
+                _mrsh_cmd="$_mrsh_a"
+            else
+                _mrsh_cmd="$_mrsh_cmd $_mrsh_a"
+            fi
+        done
+        exec /tmp/ltp-bin/sh -c "$_mrsh_cmd"
+    fi
+
     exec "$@"
 fi
 
@@ -2180,6 +2235,546 @@ MINIIP_EOF
     ltp_chmod_x "$path" || return 1
 }
 
+ltp_generate_ifconfig_wrapper() {
+    path="$1"
+
+    ltp_rm_f "$path" >/dev/null 2>&1 || true
+    if [ -e "$path" ]; then
+        echo "[LTP-TOOL-WARN] cannot replace existing tool path=$path"
+        return 1
+    fi
+
+    while IFS= read -r line; do
+        printf '%s\n' "$line"
+    done >"$path" <<'MINIIFCONFIG_EOF'
+#!/bin/sh
+# Minimal LTP net compatible ifconfig wrapper.
+# Records per-iface IPv4 assignments to /tmp/ltp-ifconfig-state.
+# State format: <iface> <ip> <netmask> <broadcast>
+# Old format (iface ip only) is compatible on read: missing fields default.
+# Does NOT configure real kernel network interfaces.
+
+minifconfig_state=/tmp/ltp-ifconfig-state
+_minifconfig_ip=
+_minifconfig_netmask=
+_minifconfig_broadcast=
+
+minifconfig_known_iface() {
+    iface="$1"
+    [ "$iface" = "lo" ] && return 0
+    case " ${LHOST_IFACES-} " in *" $iface "*) return 0 ;; esac
+    case " ${RHOST_IFACES-} " in *" $iface "*) return 0 ;; esac
+    if [ -r "$minifconfig_state" ]; then
+        while IFS= read -r _line || [ -n "$_line" ]; do
+            set -- $_line
+            [ "${1-}" = "$iface" ] && return 0
+        done <"$minifconfig_state"
+    fi
+    return 1
+}
+
+# Read all stored fields for an iface into _minifconfig_* globals.
+minifconfig_read_state() {
+    iface="$1"
+    _minifconfig_ip=
+    _minifconfig_netmask=
+    _minifconfig_broadcast=
+
+    if [ "$iface" = "lo" ]; then
+        _minifconfig_ip="${MINIIFCONFIG_LO_IP-127.0.0.1}"
+    fi
+    if [ -r "$minifconfig_state" ]; then
+        while IFS= read -r _line || [ -n "$_line" ]; do
+            set -- $_line
+            if [ "${1-}" = "$iface" ] && [ -n "${2-}" ]; then
+                _minifconfig_ip="$2"
+                _minifconfig_netmask="${3-}"
+                _minifconfig_broadcast="${4-}"
+                return
+            fi
+        done <"$minifconfig_state"
+    fi
+}
+
+minifconfig_show_one() {
+    iface="$1"
+    minifconfig_read_state "$iface"
+    ip="${_minifconfig_ip:-"(none)"}"
+    mask="${_minifconfig_netmask:-255.255.255.0}"
+    bcast="${_minifconfig_broadcast-}"
+
+    flags="UP"
+    if [ "$iface" = "lo" ]; then
+        flags="UP LOOPBACK RUNNING"
+    else
+        flags="UP BROADCAST RUNNING MULTICAST"
+    fi
+
+    if [ -n "$bcast" ]; then
+        printf '%s\n' \
+            "${iface}      Link encap:Local Loopback" \
+            "          inet addr:${ip}  Bcast:${bcast}  Mask:${mask}" \
+            "          ${flags}  MTU:65536  Metric:1"
+    else
+        printf '%s\n' \
+            "${iface}      Link encap:Local Loopback" \
+            "          inet addr:${ip}  Mask:${mask}" \
+            "          ${flags}  MTU:65536  Metric:1"
+    fi
+}
+
+minifconfig_show_all() {
+    printed_lo=0
+    _first=1
+    if [ -r "$minifconfig_state" ]; then
+        while IFS= read -r _line || [ -n "$_line" ]; do
+            set -- $_line
+            _iface="${1-}"
+            [ -n "$_iface" ] || continue
+            [ "$_iface" = "lo" ] && printed_lo=1
+            [ "$_first" -eq 1 ] || echo
+            _first=0
+            minifconfig_show_one "$_iface"
+        done <"$minifconfig_state"
+    fi
+    if [ "$printed_lo" -eq 0 ]; then
+        [ "$_first" -eq 1 ] || echo
+        minifconfig_show_one lo
+    fi
+}
+
+# Record iface state.  Accepts 2-4 fields: ip [netmask] [broadcast].
+# Reads existing record to preserve fields not being overwritten.
+minifconfig_record() {
+    iface="$1"
+    ip="$2"
+    new_mask="${3-}"
+    new_bcast="${4-}"
+
+    # Preserve existing fields not provided in this call.
+    minifconfig_read_state "$iface"
+    [ -n "$new_mask" ] || new_mask="${_minifconfig_netmask:-255.255.255.0}"
+    [ -n "$new_bcast" ] || new_bcast="${_minifconfig_broadcast-}"
+
+    tmp="${minifconfig_state}.tmp.$$"
+
+    : >"$tmp" 2>/dev/null || {
+        echo "[MINIIFCONFIG-WARN] cannot create state tmp=$tmp" >&2
+        exit 0
+    }
+
+    replaced=0
+    if [ -r "$minifconfig_state" ]; then
+        while IFS= read -r _line || [ -n "$_line" ]; do
+            set -- $_line
+            _iface="${1-}"
+            if [ "$_iface" = "$iface" ]; then
+                printf '%s %s %s %s\n' "$iface" "$ip" "$new_mask" "$new_bcast" >>"$tmp"
+                replaced=1
+            else
+                printf '%s\n' "$_line" >>"$tmp"
+            fi
+        done <"$minifconfig_state"
+    fi
+    [ "$replaced" -eq 0 ] && printf '%s %s %s %s\n' "$iface" "$ip" "$new_mask" "$new_bcast" >>"$tmp"
+
+    mv "$tmp" "$minifconfig_state" 2>/dev/null || true
+}
+
+# ----- main -----
+if [ "$#" -eq 0 ]; then
+    minifconfig_show_all
+    exit 0
+fi
+
+iface="${1-}"
+shift
+
+minifconfig_known_iface "$iface" || {
+    echo "[MINIIFCONFIG-UNSUPPORTED] unknown iface=$iface args=$*" >&2
+    exit 95
+}
+
+# Loop-parse remaining arguments.
+_ip=
+_mask=
+_bcast=
+_have_up=0
+_arg_count=0
+while [ "$#" -gt 0 ]; do
+    _arg_count="$((_arg_count + 1))"
+    # Clamp to avoid ridiculously large values from bad input.
+    [ "$_arg_count" -lt 50 ] || { echo "[MINIIFCONFIG-UNSUPPORTED] iface=$iface too many args" >&2; exit 95; }
+    case "$1" in
+        up)
+            _have_up=1
+            shift
+            ;;
+        down)
+            shift
+            ;;
+        netmask)
+            shift
+            [ "$#" -gt 0 ] || {
+                echo "[MINIIFCONFIG-UNSUPPORTED] iface=$iface missing netmask value" >&2
+                exit 95
+            }
+            case "$1" in
+                [0-9]*.[0-9]*.[0-9]*.[0-9]*) _mask="$1" ;;
+                *)
+                    echo "[MINIIFCONFIG-UNSUPPORTED] iface=$iface invalid netmask=$1" >&2
+                    exit 95
+                    ;;
+            esac
+            shift
+            ;;
+        broadcast)
+            shift
+            [ "$#" -gt 0 ] || {
+                echo "[MINIIFCONFIG-UNSUPPORTED] iface=$iface missing broadcast value" >&2
+                exit 95
+            }
+            case "$1" in
+                [0-9]*.[0-9]*.[0-9]*.[0-9]*) _bcast="$1" ;;
+                *)
+                    echo "[MINIIFCONFIG-UNSUPPORTED] iface=$iface invalid broadcast=$1" >&2
+                    exit 95
+                    ;;
+            esac
+            shift
+            ;;
+        [0-9]*.[0-9]*.[0-9]*.[0-9]*)
+            if [ -z "$_ip" ]; then
+                _ip="$1"
+            else
+                echo "[MINIIFCONFIG-UNSUPPORTED] iface=$iface extra ip=$1" >&2
+                exit 95
+            fi
+            shift
+            ;;
+        *)
+            echo "[MINIIFCONFIG-UNSUPPORTED] iface=$iface args=$*" >&2
+            exit 95
+            ;;
+    esac
+done
+
+if [ -n "$_ip" ]; then
+    # Gathered IP data — record it.
+    minifconfig_record "$iface" "$_ip" "$_mask" "$_bcast"
+elif [ "$_arg_count" -eq 0 ]; then
+    # Bare "ifconfig <iface>" — show info.
+    minifconfig_show_one "$iface"
+fi
+# else: "ifconfig lo up" or "ifconfig lo netmask ..." with no IP — no-op, exit 0.
+
+exit 0
+MINIIFCONFIG_EOF
+
+    ltp_chmod_x "$path" || return 1
+}
+
+ltp_generate_tc_wrapper() {
+    path="$1"
+
+    ltp_rm_f "$path" >/dev/null 2>&1 || true
+    if [ -e "$path" ]; then
+        echo "[LTP-TOOL-WARN] cannot replace existing tool path=$path"
+        return 1
+    fi
+
+    while IFS= read -r line; do
+        printf '%s\n' "$line"
+    done >"$path" <<'MINITC_EOF'
+#!/bin/sh
+# Minimal LTP net compatible tc wrapper.
+# Supports qdisc show/list/add/del with netem help detection and
+# optional qdisc state tracking via /tmp/ltp-tc-state.
+# Does NOT implement real traffic control.
+
+minitc_state=/tmp/ltp-tc-state
+
+minitc_unsupported() {
+    echo "[MINITC-UNSUPPORTED] args=$*" >&2
+    exit 95
+}
+
+# Check whether remaining args contain a given token.
+minitc_has_token() {
+    token="$1"; shift
+    for _a in "$@"; do
+        [ "$_a" = "$token" ] && return 0
+    done
+    return 1
+}
+
+# Read the recorded qdisc type for a device.
+minitc_read_dev() {
+    dev="$1"
+    if [ -r "$minitc_state" ]; then
+        while IFS= read -r _line || [ -n "$_line" ]; do
+            set -- $_line
+            [ "${1-}" = "$dev" ] && { printf '%s\n' "${2-}"; return; }
+        done <"$minitc_state"
+    fi
+}
+
+# Write (or remove) a device entry in the state file.
+minitc_write_dev() {
+    dev="$1"
+    qtype="${2-}"
+    tmp="${minitc_state}.tmp.$$"
+    : >"$tmp" 2>/dev/null || return 1
+    replaced=0
+    if [ -r "$minitc_state" ]; then
+        while IFS= read -r _line || [ -n "$_line" ]; do
+            set -- $_line
+            if [ "${1-}" = "$dev" ]; then
+                replaced=1
+                [ -n "$qtype" ] && printf '%s %s\n' "$dev" "$qtype" >>"$tmp"
+                # qtype empty → delete entry (skip)
+            else
+                printf '%s\n' "$_line" >>"$tmp"
+            fi
+        done <"$minitc_state"
+    fi
+    [ "$replaced" -eq 0 ] && [ -n "$qtype" ] && printf '%s %s\n' "$dev" "$qtype" >>"$tmp"
+    mv "$tmp" "$minitc_state" 2>/dev/null || true
+}
+
+if [ "$#" -eq 0 ]; then
+    printf '%s\n' \
+        'Usage: tc [ OPTIONS ] OBJECT { COMMAND | help }' \
+        'where  OBJECT := { qdisc | filter | class }' \
+        '       OPTIONS := { -h[elp] }'
+    exit 0
+fi
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|-help|--help)
+            printf '%s\n' 'minimal tc wrapper for LTP net tests'
+            exit 0
+            ;;
+        -s|-d|-b|-p|-n|-N)
+            shift
+            [ "$#" -gt 0 ] || minitc_unsupported "missing value for option"
+            shift
+            ;;
+        -[sd]*) shift ;;
+        -*) minitc_unsupported "$@" ;;
+        *) break ;;
+    esac
+done
+
+[ "$#" -gt 0 ] || { printf '%s\n' 'Usage: tc [ OPTIONS ] OBJECT { COMMAND | help }'; exit 0; }
+cmd="$1"
+shift
+
+# Capture remaining arguments (after the sub-command) for token inspection.
+save_rest() { _rest="$*"; }
+save_rest "$@"
+
+case "$cmd" in
+    qdisc)
+        sub="${1-show}"
+        shift || true
+        case "$sub" in
+            show|list)
+                # Extract optional "dev <name>".
+                _show_dev=
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        dev) shift; [ "$#" -gt 0 ] && { _show_dev="$1"; shift; } ;;
+                        *) shift ;;
+                    esac
+                done
+                if [ -n "$_show_dev" ]; then
+                    _qt="$(minitc_read_dev "$_show_dev")"
+                    if [ "$_qt" = "netem" ]; then
+                        printf '%s\n' 'qdisc netem 1: root refcnt 2'
+                    else
+                        printf '%s\n' 'qdisc noop 0: root refcnt 2'
+                    fi
+                else
+                    printf '%s\n' 'qdisc noop 0: root refcnt 2'
+                fi
+                exit 0
+                ;;
+            add|change|replace)
+                # Check for netem + help → output Usage for LTP check_netem.
+                # $_rest is space-joined, so pass unquoted for word-splitting.
+                if minitc_has_token netem $_rest && minitc_has_token help $_rest; then
+                    printf '%s\n' \
+                        'Usage: ... netem [ limit PACKETS ]' \
+                        '                  [ delay TIME [ JITTER ] ]' \
+                        '                  [ loss PERCENT ]' \
+                        '                  [ duplicate PERCENT ]' \
+                        '                  [ corrupt PERCENT ]' \
+                        '                  [ reorder PERCENT ]'
+                    exit 0
+                fi
+                # Non-help netem add: record in state.
+                _add_dev=
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        dev) shift; [ "$#" -gt 0 ] && { _add_dev="$1"; shift; } ;;
+                        *) shift ;;
+                    esac
+                done
+                if [ -n "$_add_dev" ] && minitc_has_token netem $_rest; then
+                    minitc_write_dev "$_add_dev" netem
+                fi
+                exit 0
+                ;;
+            del|delete)
+                # Remove from state.
+                _del_dev=
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        dev) shift; [ "$#" -gt 0 ] && { _del_dev="$1"; shift; } ;;
+                        *) shift ;;
+                    esac
+                done
+                [ -n "$_del_dev" ] && minitc_write_dev "$_del_dev" ""
+                exit 0
+                ;;
+            *)
+                minitc_unsupported "$cmd $sub $*"
+                ;;
+        esac
+        ;;
+    filter|class)
+        minitc_unsupported "$cmd $*"
+        ;;
+    *)
+        minitc_unsupported "$cmd $*"
+        ;;
+esac
+MINITC_EOF
+
+    ltp_chmod_x "$path" || return 1
+}
+
+ltp_generate_grep_wrapper() {
+    path="$1"
+
+    ltp_rm_f "$path" >/dev/null 2>&1 || true
+    if [ -e "$path" ]; then
+        echo "[LTP-TOOL-WARN] cannot replace existing tool path=$path"
+        return 1
+    fi
+
+    while IFS= read -r line; do
+        printf '%s\n' "$line"
+    done >"$path" <<'MINIGREP_EOF'
+#!/bin/sh
+# Minimal grep wrapper that translates GNU -NUM shorthand (e.g. grep -1)
+# to POSIX -B NUM, which BusyBox grep supports.  This is the single call
+# site that the old LTP ns-tools get_ifname helper relies on.
+
+minigrep_find_backend() {
+    # Prefer a real grep binary over the busybox applet so that extended
+    # GNU options work without extra translation.
+    for g in /bin/grep /usr/bin/grep /sbin/grep /usr/sbin/grep; do
+        case "$g" in /tmp/ltp-bin/grep) continue ;; esac
+        [ -x "$g" ] && { printf '%s\n' "$g"; return 0; }
+    done
+
+    case "${LTP_CURRENT_LIBC-}" in
+        glibc) bb=/glibc/busybox ;;
+        musl)  bb=/musl/busybox ;;
+        *)     bb= ;;
+    esac
+    [ -n "$bb" ] && [ -x "$bb" ] && { printf '%s %s\n' "$bb" grep; return 0; }
+
+    for bb in /busybox /bin/busybox ./busybox; do
+        [ -x "$bb" ] && { printf '%s %s\n' "$bb" grep; return 0; }
+    done
+    return 1
+}
+
+minigrep_backend="$(minigrep_find_backend)"
+[ -z "$minigrep_backend" ] && { echo "[MINIGREP-NO-BACKEND]" >&2; exit 95; }
+
+# Rebuild argv, translating -NUM to -B NUM.
+# We use a temp file so that arguments containing whitespace or special
+# characters survive the transformation without eval.
+minigrep_tmp="/tmp/minigrep_args_$$"
+: > "$minigrep_tmp"
+for arg in "$@"; do
+    case "$arg" in
+        -[1-9]|-1[0-9]|-20)
+            printf '%s\n' "-B" >> "$minigrep_tmp"
+            printf '%s\n' "${arg#-}" >> "$minigrep_tmp"
+            ;;
+        *)
+            printf '%s\n' "$arg" >> "$minigrep_tmp"
+            ;;
+    esac
+done
+
+set --
+while IFS= read -r minigrep_line || [ -n "$minigrep_line" ]; do
+    set -- "$@" "$minigrep_line"
+done < "$minigrep_tmp"
+rm -f "$minigrep_tmp" 2>/dev/null || true
+
+exec $minigrep_backend "$@"
+MINIGREP_EOF
+
+    ltp_chmod_x "$path" || return 1
+}
+
+ltp_generate_fgrep_wrapper() {
+    path="$1"
+
+    ltp_rm_f "$path" >/dev/null 2>&1 || true
+    if [ -e "$path" ]; then
+        echo "[LTP-TOOL-WARN] cannot replace existing tool path=$path"
+        return 1
+    fi
+
+    while IFS= read -r line; do
+        printf '%s\n' "$line"
+    done >"$path" <<'MINIFGREP_EOF'
+#!/bin/sh
+# Minimal fgrep wrapper. Delegates to grep -F with a discovered backend.
+# Does not implement grep -1 translation; the grep wrapper handles that.
+
+_fgrep_find_backend() {
+    # Prefer the LTP grep wrapper so that -1 → -B 1 compat is inherited.
+    if [ -x /tmp/ltp-bin/grep ]; then
+        printf '%s\n' /tmp/ltp-bin/grep
+        return 0
+    fi
+    # Real grep binary.
+    for g in /bin/grep /usr/bin/grep /sbin/grep /usr/sbin/grep; do
+        case "$g" in /tmp/ltp-bin/grep) continue ;; esac
+        [ -x "$g" ] && { printf '%s\n' "$g"; return 0; }
+    done
+    # BusyBox applet.
+    case "${LTP_CURRENT_LIBC-}" in
+        glibc) bb=/glibc/busybox ;;
+        musl)  bb=/musl/busybox ;;
+        *)     bb= ;;
+    esac
+    [ -n "$bb" ] && [ -x "$bb" ] && { printf '%s %s\n' "$bb" grep; return 0; }
+    for bb in /busybox /bin/busybox ./busybox; do
+        [ -x "$bb" ] && { printf '%s %s\n' "$bb" grep; return 0; }
+    done
+    return 1
+}
+
+_fgrep_backend="$(_fgrep_find_backend)"
+[ -z "$_fgrep_backend" ] && { echo "[MINIFGREP-NO-BACKEND]" >&2; exit 95; }
+
+exec $_fgrep_backend -F "$@"
+MINIFGREP_EOF
+
+    ltp_chmod_x "$path" || return 1
+}
+
 ltp_generate_wrapper() {
     cmd="$1"
     path="$2"
@@ -2199,6 +2794,8 @@ ltp_generate_wrapper() {
         awk)      ltp_generate_awk_wrapper "$path" ;;
         cat)      ltp_generate_cat_wrapper "$path" ;;
         rm)       ltp_generate_rm_wrapper "$path" ;;
+        grep)     ltp_generate_grep_wrapper "$path" ;;
+        fgrep)    ltp_generate_fgrep_wrapper "$path" ;;
         locale)   ltp_generate_locale_wrapper "$path" ;;
         basename) ltp_generate_basename_wrapper "$path" ;;
         dirname)  ltp_generate_dirname_wrapper "$path" ;;
@@ -2206,6 +2803,8 @@ ltp_generate_wrapper() {
         false)    ltp_generate_false_wrapper "$path" ;;
         id)       ltp_generate_id_wrapper "$path" ;;
         pkill)    ltp_generate_pkill_wrapper "$path" ;;
+        ifconfig) ltp_generate_ifconfig_wrapper "$path" ;;
+        tc)       ltp_generate_tc_wrapper "$path" ;;
         *) return 1 ;;
     esac
 }
@@ -2225,7 +2824,7 @@ ltp_prepare_one_tool() {
             fi
             return
             ;;
-        sh|rcp|scp)
+        sh|rcp|scp|grep|fgrep|ifconfig|tc)
             if ltp_generate_wrapper "$cmd" "$tool_path" && ltp_tool_test "$cmd" "$tool_path"; then
                 echo "[LTP-TOOL-PREP] libc=$libc cmd=$cmd provider=wrapper path=$tool_path"
                 return
@@ -2354,7 +2953,7 @@ ltp_prepare_tools() {
         return
     fi
 
-    for cmd in sh rsh ssh rcp scp ip wc mktemp head setkey cut awk cat rm grep sed expr printf locale basename dirname true false id pkill busybox; do
+    for cmd in sh rsh ssh rcp scp ip wc mktemp head setkey cut awk cat rm grep fgrep sed expr printf locale basename dirname true false id pkill date ps ifconfig tc busybox; do
         ltp_prepare_one_tool "$libc" "$cmd"
     done
 
@@ -2381,7 +2980,7 @@ ltp_tool_diag() {
     for dir in /bin /sbin /usr/bin /usr/sbin "$LTP_TOOL_DIR"; do
         if [ -d "$dir" ]; then
             line="[LTP-TOOL-DIR] libc=$libc path=$dir exists=yes"
-            for cmd in sh rsh ssh rcp scp ip wc mktemp head setkey cut awk cat rm grep sed expr printf locale basename dirname true false id pkill busybox; do
+            for cmd in sh rsh ssh rcp scp ip wc mktemp head setkey cut awk cat rm grep fgrep sed expr printf locale basename dirname true false id pkill date ps ifconfig tc busybox; do
                 if [ -e "$dir/$cmd" ]; then
                     line="$line $cmd=yes"
                 else
@@ -3522,6 +4121,15 @@ run_ltp_batch_libc() {
     ltp_prepare_tools "$libc"
     ltp_prepare_shell "$libc"
     ltp_tool_diag "$libc"
+
+    if [ -n "${NS_DURATION-}" ]; then
+        export NS_DURATION
+        case "$LTP_CATEGORY" in
+            net|net-core|net-all|net-script|net-deferred)
+                echo "[LTP-NETENV] NS_DURATION=$NS_DURATION"
+                ;;
+        esac
+    fi
 
     for batch in $batches; do
         run_ltp_one_batch_libc "$libc" "$batch"
