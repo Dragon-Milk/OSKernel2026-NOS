@@ -345,6 +345,18 @@ run_full_safe_non_ltp_tests() {
     done
 }
 
+prepare_stable_test_env() {
+    if [ -x /glibc/busybox ]; then
+        /glibc/busybox chmod +x /glibc/basic/run-all.sh /glibc/basic/test_* 2>/dev/null || true
+        /glibc/busybox ln -sf busybox /glibc/ls 2>/dev/null || true
+    fi
+
+    if [ -x /musl/busybox ]; then
+        /musl/busybox chmod +x /musl/basic/run-all.sh /musl/basic/test_* 2>/dev/null || true
+        /musl/busybox ln -sf busybox /musl/ls 2>/dev/null || true
+    fi
+}
+
 run_stable_tests() {
     for testcase in \
         /glibc/basic_testcode.sh \
@@ -878,6 +890,7 @@ case "$TEST_PROFILE" in
         ;;
     full-safe)
         prepare_basic_scripts
+        prepare_stable_test_env
         run_full_safe_non_ltp_tests
         run_ltp_safe_tests
         ;;
