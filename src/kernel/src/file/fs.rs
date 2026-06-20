@@ -21,7 +21,7 @@ use axtask::{
 };
 use linux_raw_sys::general::{
     AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW, MS_RDONLY, O_APPEND, O_NONBLOCK, O_PATH, O_RDWR,
-    O_NOATIME, O_WRONLY, RLIMIT_FSIZE,
+    O_NOATIME, O_WRONLY, RLIMIT_FSIZE, RLIM64_INFINITY,
 };
 
 use super::{FileLike, Kstat, get_file_like, get_inode_flags};
@@ -565,7 +565,7 @@ impl FileLike for File {
     fn write(&self, src: &mut IoSrc) -> AxResult<usize> {
         let mut inner = self.inner();
         let file_limit = axtask::current().as_thread().proc_data.rlim.read()[RLIMIT_FSIZE].current;
-        if file_limit != 0 {
+        if file_limit != 0 && file_limit != RLIM64_INFINITY as u64 {
             let pos = inner.stream_position()?;
             if pos >= file_limit {
                 return Ok(0);
