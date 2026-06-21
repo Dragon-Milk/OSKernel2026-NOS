@@ -19,6 +19,7 @@ export PATH=$BASE_PATH
 # ltp-only      : run glibc and musl ltp only
 # ltp-list      : list glibc and musl ltp testcase names only
 # ltp-batch     : run one or all embedded phase1 LTP category batches (LTP_BATCH=all|01|02...)
+# testb         : run only the embedded testb LTP batch
 # perf          : run stable profile with kernel-side perf summary when built with perf-profile
 # unixbench     : run glibc and musl unixbench only
 # wait-repro    : run wait/libctest/lmbench/unixbench repro
@@ -26,8 +27,8 @@ export PATH=$BASE_PATH
 # full-safe     : run stable profile plus LTP safe whitelist from ltp-safe.txt
 # ============================================================
 SKIP_LTP=${SKIP_LTP:-0}
-TEST_PROFILE=${TEST_PROFILE:-ltp-batch}
-LTP_CATEGORY=${LTP_CATEGORY:-process}
+TEST_PROFILE=${TEST_PROFILE:-testb}
+LTP_CATEGORY=${LTP_CATEGORY:-testb}
 LTP_BATCH=${LTP_BATCH:-all}
 LTP_LIBC=${LTP_LIBC:-both}
 echo "[init] TEST_PROFILE=$TEST_PROFILE"
@@ -54,7 +55,12 @@ ensure_named_entry() {
 }
 
 ensure_user_database() {
-    mkdir -p /etc || return
+    bb="$(busybox_cmd)"
+    if [ -n "$bb" ]; then
+        "$bb" mkdir -p /etc || return
+    else
+        mkdir -p /etc || return
+    fi
     [ -f /etc/passwd ] || : > /etc/passwd
     [ -f /etc/group ] || : > /etc/group
 
@@ -65,7 +71,29 @@ ensure_user_database() {
     ensure_named_entry /etc/group nobody 'nobody:x:65534:'
 }
 
-ensure_user_database
+ensure_busybox_applets() {
+    bb="$(busybox_cmd)"
+    [ -n "$bb" ] || return
+    case "$bb" in
+        /*) ;;
+        ./*) bb="$(pwd)/${bb#./}" ;;
+        *) bb="$(pwd)/$bb" ;;
+    esac
+
+    for dir in /bin /usr/bin /sbin /usr/sbin; do
+        "$bb" mkdir -p "$dir" 2>/dev/null || true
+    done
+
+    for applet in \
+        basename cat chmod chown cp cut date dirname echo env expr false grep head id killall ln ls \
+        mkdir mktemp mount mv printf pwd readlink rm rmdir sed sh sleep sort tail test touch \
+        tr true umount uname uniq wc which xargs zcat
+    do
+        [ -e "/bin/$applet" ] || "$bb" ln -sf "$bb" "/bin/$applet" 2>/dev/null || true
+        [ -e "/usr/bin/$applet" ] || "$bb" ln -sf "$bb" "/usr/bin/$applet" 2>/dev/null || true
+        [ -e "./$applet" ] || "$bb" ln -sf "$bb" "./$applet" 2>/dev/null || true
+    done
+}
 
 run_with_shell() {
     script="$1"
@@ -94,6 +122,8 @@ busybox_cmd() {
         echo /glibc/busybox
     fi
 }
+
+ensure_user_database
 
 is_leftover_command() {
     case "$1" in
@@ -258,6 +288,8 @@ run_all_non_ltp_testcode_tests() {
 }
 
 prepare_stable_test_env() {
+    ensure_busybox_applets
+
     if [ -x /glibc/busybox ]; then
         /glibc/busybox chmod +x /glibc/basic/run-all.sh /glibc/basic/test_* 2>/dev/null || true
         /glibc/busybox ln -sf busybox /glibc/ls 2>/dev/null || true
@@ -450,13 +482,21 @@ run_ltp_one_batch_libc() {
     fi
 
     set_library_path "$dir"
+    ensure_busybox_applets
+    bb="$(busybox_cmd)"
+    if [ -n "$bb" ]; then
+        "$bb" rm -rf /usr/sbin/ltp 2>/dev/null || true
+        "$bb" ln -sfn "$dir/ltp" /usr/sbin/ltp 2>/dev/null || true
+    else
+        rm -rf /usr/sbin/ltp 2>/dev/null || true
+        ln -sfn "$dir/ltp" /usr/sbin/ltp 2>/dev/null || true
+    fi
     export LTPROOT="$dir/ltp"
     export LTP_DATAROOT="$dir/ltp/testcases/bin"
     export PATH="$dir/ltp/testcases/bin:$PATH"
     mkdir -p /dev/shm
     export LTP_IPC_PATH="/dev/shm/ltp_ipc_path"
     : > "$LTP_IPC_PATH"
-    bb="$(busybox_cmd)"
     case_timeout="${LTP_CASE_TIMEOUT:-45}"
 
     ltp_batch_cases "$LTP_CATEGORY" "$batch" | while read name; do
@@ -515,7 +555,7 @@ run_ltp_batch_tests() {
     found=1
 
     case "$LTP_CATEGORY" in
-        process|fs|mm-ipc|common-easy) ;;
+        process|fs|mm-ipc|common-easy|part-b|testb) ;;
         *)
             echo "[LTP-BATCH-ERROR] unsupported category: $LTP_CATEGORY"
             return
@@ -719,6 +759,11 @@ case "$TEST_PROFILE" in
         run_ltp_list_tests
         ;;
     ltp-batch)
+        run_ltp_batch_tests
+        ;;
+    testb)
+        LTP_CATEGORY=testb
+        LTP_BATCH=all
         run_ltp_batch_tests
         ;;
     perf)

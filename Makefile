@@ -42,6 +42,14 @@ perf-rv:
 perf-la:
 	@$(MAKE) -C $(SRC_DIR) A=$(SRC_DIR) TARGET_DIR=$(SRC_DIR)/target OUT_CONFIG=$(LA_OUT_CONFIG) ARCH=loongarch64 TEST_PROFILE=perf run
 
+testb-rv:
+	@$(MAKE) -C $(SRC_DIR) A=$(SRC_DIR) TARGET_DIR=$(SRC_DIR)/target OUT_CONFIG=$(RV_OUT_CONFIG) ARCH=riscv64 TEST_PROFILE=testb LTP_CATEGORY=testb LTP_BATCH=all LTP_LIBC=both DISK_IMG?=sdcard-rv.img run
+
+testb-la:
+	@$(MAKE) -C $(SRC_DIR) A=$(SRC_DIR) TARGET_DIR=$(SRC_DIR)/target OUT_CONFIG=$(LA_OUT_CONFIG) ARCH=loongarch64 TEST_PROFILE=testb LTP_CATEGORY=testb LTP_BATCH=all LTP_LIBC=both DISK_IMG?=sdcard-la.img run
+
+testb: testb-rv
+
 clean:
 	@$(MAKE) -C $(SRC_DIR)/make \
 		APP=$(SRC_DIR) \
@@ -53,4 +61,4 @@ clean:
 		$(SRC_DIR)/.axconfig-riscv64.toml $(SRC_DIR)/.axconfig-riscv64.old.toml \
 		$(SRC_DIR)/.axconfig-loongarch64.toml $(SRC_DIR)/.axconfig-loongarch64.old.toml
 
-.PHONY: all prepare-vendor kernel-rv kernel-la run clean perf-rv perf-la
+.PHONY: all prepare-vendor kernel-rv kernel-la run clean perf-rv perf-la testb-rv testb-la testb

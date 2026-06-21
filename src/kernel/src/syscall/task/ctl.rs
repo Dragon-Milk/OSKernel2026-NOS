@@ -14,6 +14,7 @@ use crate::{
 const CAPABILITY_VERSION_1: u32 = 0x19980330;
 const CAPABILITY_VERSION_2: u32 = 0x20071026;
 const CAPABILITY_VERSION_3: u32 = 0x20080522;
+const CAP_SETPCAP: u32 = 8;
 
 fn validate_cap_header(
     header_ptr: *mut __user_cap_header_struct,
@@ -21,22 +22,29 @@ fn validate_cap_header(
     // FIXME: AnyBitPattern
     let mut header = unsafe { header_ptr.vm_read_uninit()?.assume_init() };
 
-    // Accept all three capability versions; upgrade v1/v2 to v3 for the caller
+    // Accept all three capability versions; upgrade v1/v2 to v3 for the caller.
+    // For an unsupported version Linux writes the preferred version and returns EINVAL.
     match header.version {
         CAPABILITY_VERSION_1 | CAPABILITY_VERSION_2 => {
             header.version = CAPABILITY_VERSION_3;
             header_ptr.vm_write(header)?;
         }
         CAPABILITY_VERSION_3 => {}
-        _ => return Err(AxError::InvalidInput),
+        _ => {
+            header.version = CAPABILITY_VERSION_3;
+            header_ptr.vm_write(header)?;
+            return Err(AxError::InvalidInput);
+        }
     }
 
-    // capget/capset on a non-current process returns EPERM (not ESRCH)
+    if header.pid < 0 {
+        return Err(AxError::InvalidInput);
+    }
+
     if header.pid != 0 {
         let curr_pid = current().as_thread().proc_data.proc.pid();
         if header.pid as u32 != curr_pid {
-            // Returning EINVAL for non-existent pid matches Linux behaviour
-            let _ = get_process_data(header.pid as u32).map_err(|_| AxError::InvalidInput)?;
+            get_process_data(header.pid as u32)?;
         }
     }
 
@@ -74,7 +82,14 @@ pub fn sys_capset(
 
     // Validate the requested capability data: inheritable must be a subset of permitted
     let data = unsafe { data.vm_read_uninit()?.assume_init() };
-    if data.inheritable & !data.permitted != 0 {
+    let old = current().as_thread().proc_data.capabilities();
+    let cap_setpcap = 1u32 << CAP_SETPCAP;
+    let can_setpcap = old.effective & cap_setpcap != 0;
+    if data.effective & !data.permitted != 0
+        || data.permitted & !old.permitted != 0
+        || (can_setpcap && data.inheritable & !(old.inheritable | old.bounding) != 0)
+        || (!can_setpcap && data.inheritable & !old.inheritable != 0)
+    {
         return Err(AxError::OperationNotPermitted);
     }
     current()
@@ -84,6 +99,7 @@ pub fn sys_capset(
             effective: data.effective,
             permitted: data.permitted,
             inheritable: data.inheritable,
+            bounding: old.bounding,
         });
 
     Ok(0)
@@ -301,15 +317,26 @@ pub fn sys_prctl(
         PR_GET_SPECULATION_CTRL => {
             return Err(AxError::InvalidInput);
         }
-        PR_SET_SECUREBITS | PR_CAPBSET_DROP => {
+        PR_SET_SECUREBITS => {
             return Err(AxError::OperationNotPermitted);
+        }
+        PR_CAPBSET_DROP => {
+            if arg2 >= 32 {
+                return Err(AxError::InvalidInput);
+            }
+            let curr = current();
+            let proc_data = &curr.as_thread().proc_data;
+            let mut caps = proc_data.capabilities();
+            caps.bounding &= !(1u32 << arg2);
+            proc_data.set_capabilities(caps);
         }
         PR_MCE_KILL => {}
         PR_CAPBSET_READ => {
-            // Return 0 (capability not in bounding set) since we don't
-            // implement capabilities.
-            // The result is written to *(int *)arg3.
-            (arg3 as *mut u32).vm_write(0)?;
+            if arg2 >= 32 {
+                return Err(AxError::InvalidInput);
+            }
+            let caps = current().as_thread().proc_data.capabilities();
+            return Ok(((caps.bounding & (1u32 << arg2)) != 0) as isize);
         }
         PR_CAP_AMBIENT => {
             match arg2 as u32 {

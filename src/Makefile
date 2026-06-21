@@ -102,7 +102,13 @@ perf-rv:
 perf-la:
 	$(MAKE) ARCH=loongarch64 OUT_CONFIG=$(LA_OUT_CONFIG) TEST_PROFILE=perf run
 
+testb-rv:
+	$(MAKE) ARCH=riscv64 OUT_CONFIG=$(RV_OUT_CONFIG) TEST_PROFILE=testb LTP_CATEGORY=testb LTP_BATCH=all LTP_LIBC=both DISK_IMG?=sdcard-rv.img run
+
+testb-la:
+	$(MAKE) ARCH=loongarch64 OUT_CONFIG=$(LA_OUT_CONFIG) TEST_PROFILE=testb LTP_CATEGORY=testb LTP_BATCH=all LTP_LIBC=both DISK_IMG?=sdcard-la.img run
+
 vf2:
 	$(MAKE) ARCH=riscv64 APP_FEATURES=vf2 MYPLAT=axplat-riscv64-visionfive2 BUS=mmio build
 
-.PHONY: all kernel-rv kernel-la build run justrun debug disasm clean perf-rv perf-la
+.PHONY: all kernel-rv kernel-la build run justrun debug disasm clean perf-rv perf-la testb-rv testb-la
