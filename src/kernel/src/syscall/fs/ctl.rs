@@ -6,7 +6,7 @@ use core::{
 };
 
 use axerrno::{AxError, AxResult};
-use axfs::{FsContext, FS_CONTEXT};
+use axfs::{FsContext, OpenOptions, FS_CONTEXT};
 use axfs_ng_vfs::{path::Path, MetadataUpdate, NodePermission, NodeType};
 use axhal::time::wall_time;
 use axtask::current;
@@ -100,6 +100,26 @@ pub fn sys_mkdirat(dirfd: i32, path: *const c_char, mode: u32) -> AxResult<isize
         fs.create_dir(path, mode)?;
         Ok(0)
     })
+}
+
+pub fn sys_mknodat(dirfd: i32, path: *const c_char, mode: u32, _dev: u32) -> AxResult<isize> {
+    let path = vm_load_string(path)?;
+    debug!("sys_mknodat <= dirfd: {dirfd}, path: {path}, mode: {mode:#o}");
+
+    if mode & S_IFMT != S_IFIFO {
+        return Err(AxError::Unsupported);
+    }
+
+    let mode = mode & !current().as_thread().proc_data.umask();
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .user(0, 0);
+    with_fs(dirfd, |fs| options.open(fs, path.as_str()).map(|_| ()))?;
+    Ok(0)
 }
 
 // Directory buffer for getdents64 syscall
@@ -254,10 +274,14 @@ pub fn sys_unlink(path: *const c_char) -> AxResult<isize> {
 pub fn sys_getcwd(buf: *mut u8, size: isize) -> AxResult<isize> {
     let size: usize = size.try_into().map_err(|_| AxError::BadAddress)?;
     if buf.is_null() {
-        return Ok(0);
+        return Err(AxError::BadAddress);
     }
 
-    let cwd = FS_CONTEXT.lock().current_dir().absolute_path()?;
+    let cwd = FS_CONTEXT
+        .lock()
+        .current_dir()
+        .absolute_path()
+        .unwrap_or_else(|_| "/".into());
     debug!("sys_getcwd => cwd: {cwd}");
 
     let cwd = CString::new(cwd.as_str()).map_err(|_| AxError::InvalidInput)?;
@@ -265,8 +289,7 @@ pub fn sys_getcwd(buf: *mut u8, size: isize) -> AxResult<isize> {
 
     if cwd.len() <= size {
         vm_write_slice(buf, cwd)?;
-        // FIXME: it is said that this should return 0
-        Ok(buf.as_ptr() as _)
+        Ok(cwd.len() as _)
     } else {
         Err(AxError::OutOfRange)
     }

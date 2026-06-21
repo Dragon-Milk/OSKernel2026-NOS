@@ -14,6 +14,7 @@ use core::{
 };
 
 use axfs_ng_vfs::{Filesystem, NodeType, VfsError, VfsResult};
+use axhal::paging::MappingFlags;
 use axtask::{AxTaskRef, WeakAxTaskRef, current};
 use indoc::indoc;
 use starry_process::Process;
@@ -24,6 +25,7 @@ use crate::{
         DirMaker, DirMapping, NodeOpsMux, RwFile, SimpleDir, SimpleDirOps, SimpleFile,
         SimpleFileOperation, SimpleFs,
     },
+    syscall::{MQ_QUEUES_MAX, MSGMNI_LIMIT, MSG_NEXT_ID, SEMMNI_LIMIT, SHMMAX_LIMIT, SHMMNI_LIMIT, SHM_NEXT_ID, proc_sysvipc_msg, proc_sysvipc_sem, proc_sysvipc_shm},
     task::{AsThread, TaskStat, get_task, tasks},
 };
 
@@ -258,12 +260,25 @@ impl SimpleDirOps for ThreadDir {
             )
             .into(),
             "maps" => SimpleFile::new_regular(fs, move || {
-                Ok(indoc! {"
-                    7f000000-7f001000 r--p 00000000 00:00 0          [vdso]
-                    7f001000-7f003000 r-xp 00001000 00:00 0          [vdso]
-                    7f003000-7f005000 r--p 00003000 00:00 0          [vdso]
-                    7f005000-7f007000 rw-p 00005000 00:00 0          [vdso]
-                "})
+                let aspace = task.as_thread().proc_data.aspace.lock();
+                let mut maps = String::new();
+                for area in aspace.areas() {
+                    let flags = area.flags();
+                    let read = if flags.contains(MappingFlags::READ) { 'r' } else { '-' };
+                    let write = if flags.contains(MappingFlags::WRITE) { 'w' } else { '-' };
+                    let exec = if flags.contains(MappingFlags::EXECUTE) { 'x' } else { '-' };
+                    let share = if area.backend().is_shared_mapping() { 's' } else { 'p' };
+                    maps.push_str(&format!(
+                        "{:x}-{:x} {}{}{}{} 00000000 00:00 0\n",
+                        area.start().as_usize(),
+                        area.end().as_usize(),
+                        read,
+                        write,
+                        exec,
+                        share,
+                    ));
+                }
+                Ok(maps)
             })
             .into(),
             "mounts" => SimpleFile::new_regular(fs, move || {
@@ -415,8 +430,54 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         );
     }
 
+    root.add("sysvipc", {
+        let mut sysvipc = DirMapping::new();
+        sysvipc.add(
+            "msg",
+            SimpleFile::new_regular(fs.clone(), || Ok(proc_sysvipc_msg())),
+        );
+        sysvipc.add(
+            "sem",
+            SimpleFile::new_regular(fs.clone(), || Ok(proc_sysvipc_sem())),
+        );
+        sysvipc.add(
+            "shm",
+            SimpleFile::new_regular(fs.clone(), || Ok(proc_sysvipc_shm())),
+        );
+        SimpleDir::new_maker(fs.clone(), Arc::new(sysvipc))
+    });
+
     root.add("sys", {
         let mut sys = DirMapping::new();
+
+        sys.add("fs", {
+            let mut fs_dir = DirMapping::new();
+            fs_dir.add("mqueue", {
+                let mut mqueue = DirMapping::new();
+                mqueue.add(
+                    "queues_max",
+                    SimpleFile::new_regular(
+                        fs.clone(),
+                        RwFile::new(|req| match req {
+                            SimpleFileOperation::Read => Ok(Some(
+                                format!("{}\n", MQ_QUEUES_MAX.load(Ordering::Relaxed)).into_bytes(),
+                            )),
+                            SimpleFileOperation::Write(data) => {
+                                let text = str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
+                                let value = text
+                                    .split(|ch: char| ch.is_whitespace() || ch == '\0')
+                                    .find_map(|it| it.parse::<usize>().ok())
+                                    .ok_or(VfsError::InvalidInput)?;
+                                MQ_QUEUES_MAX.store(value, Ordering::Relaxed);
+                                Ok(None)
+                            }
+                        }),
+                    ),
+                );
+                SimpleDir::new_maker(fs.clone(), Arc::new(mqueue))
+            });
+            SimpleDir::new_maker(fs.clone(), Arc::new(fs_dir))
+        });
 
         sys.add("kernel", {
             let mut kernel = DirMapping::new();
@@ -428,6 +489,134 @@ fn builder(fs: Arc<SimpleFs>) -> DirMaker {
             kernel.add(
                 "tainted",
                 SimpleFile::new_regular(fs.clone(), || Ok("0\n")),
+            );
+            kernel.add(
+                "msgmni",
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    RwFile::new(|req| match req {
+                        SimpleFileOperation::Read => Ok(Some(
+                            format!("{}\n", MSGMNI_LIMIT.load(Ordering::Relaxed)).into_bytes(),
+                        )),
+                        SimpleFileOperation::Write(data) => {
+                            let text = str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
+                            let value = text
+                                .split(|ch: char| ch.is_whitespace() || ch == '\0')
+                                .find_map(|it| it.parse::<usize>().ok())
+                                .ok_or(VfsError::InvalidInput)?;
+                            MSGMNI_LIMIT.store(value, Ordering::Relaxed);
+                            Ok(None)
+                        }
+                    }),
+                ),
+            );
+            kernel.add(
+                "shmmax",
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    RwFile::new(|req| match req {
+                        SimpleFileOperation::Read => Ok(Some(
+                            format!("{}\n", SHMMAX_LIMIT.load(Ordering::Relaxed)).into_bytes(),
+                        )),
+                        SimpleFileOperation::Write(data) => {
+                            let text = str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
+                            let value = text
+                                .split(|ch: char| ch.is_whitespace() || ch == '\0')
+                                .find_map(|it| it.parse::<usize>().ok())
+                                .ok_or(VfsError::InvalidInput)?;
+                            SHMMAX_LIMIT.store(value, Ordering::Relaxed);
+                            Ok(None)
+                        }
+                    }),
+                ),
+            );
+            kernel.add(
+                "shmmni",
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    RwFile::new(|req| match req {
+                        SimpleFileOperation::Read => Ok(Some(
+                            format!("{}\n", SHMMNI_LIMIT.load(Ordering::Relaxed)).into_bytes(),
+                        )),
+                        SimpleFileOperation::Write(data) => {
+                            let text = str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
+                            let value = text
+                                .split(|ch: char| ch.is_whitespace() || ch == '\0')
+                                .find_map(|it| it.parse::<usize>().ok())
+                                .ok_or(VfsError::InvalidInput)?;
+                            SHMMNI_LIMIT.store(value, Ordering::Relaxed);
+                            Ok(None)
+                        }
+                    }),
+                ),
+            );
+            kernel.add(
+                "shm_next_id",
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    RwFile::new(|req| match req {
+                        SimpleFileOperation::Read => Ok(Some(
+                            format!("{}\n", SHM_NEXT_ID.load(Ordering::Relaxed)).into_bytes(),
+                        )),
+                        SimpleFileOperation::Write(data) => {
+                            let text = str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
+                            let value = text
+                                .split(|ch: char| ch.is_whitespace() || ch == '\0')
+                                .find_map(|it| it.parse::<i32>().ok())
+                                .ok_or(VfsError::InvalidInput)?;
+                            SHM_NEXT_ID.store(value, Ordering::Relaxed);
+                            Ok(None)
+                        }
+                    }),
+                ),
+            );
+            kernel.add(
+                "msg_next_id",
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    RwFile::new(|req| match req {
+                        SimpleFileOperation::Read => Ok(Some(
+                            format!("{}\n", MSG_NEXT_ID.load(Ordering::Relaxed)).into_bytes(),
+                        )),
+                        SimpleFileOperation::Write(data) => {
+                            let text = str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
+                            let value = text
+                                .split(|ch: char| ch.is_whitespace() || ch == '\0')
+                                .find_map(|it| it.parse::<i32>().ok())
+                                .ok_or(VfsError::InvalidInput)?;
+                            MSG_NEXT_ID.store(value, Ordering::Relaxed);
+                            Ok(None)
+                        }
+                    }),
+                ),
+            );
+            kernel.add(
+                "sem",
+                SimpleFile::new_regular(
+                    fs.clone(),
+                    RwFile::new(|req| match req {
+                        SimpleFileOperation::Read => Ok(Some(
+                            format!(
+                                "32000 1024000000 500 {}\n",
+                                SEMMNI_LIMIT.load(Ordering::Relaxed)
+                            )
+                            .into_bytes(),
+                        )),
+                        SimpleFileOperation::Write(data) => {
+                            let text = str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
+                            let values = text
+                                .split_whitespace()
+                                .filter_map(|it| it.parse::<usize>().ok())
+                                .collect::<Vec<_>>();
+                            if let Some(value) = values.get(3) {
+                                SEMMNI_LIMIT.store(*value, Ordering::Relaxed);
+                                Ok(None)
+                            } else {
+                                Err(VfsError::InvalidInput)
+                            }
+                        }
+                    }),
+                ),
             );
 
             SimpleDir::new_maker(fs.clone(), Arc::new(kernel))

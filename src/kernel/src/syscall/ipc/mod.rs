@@ -1,6 +1,8 @@
 use core::sync::atomic::{AtomicI32, Ordering};
 
+mod mqueue;
 mod msg;
+mod sem;
 mod shm;
 use bytemuck::AnyBitPattern;
 use linux_raw_sys::{
@@ -8,7 +10,7 @@ use linux_raw_sys::{
     general::*,
 };
 
-pub use self::{msg::*, shm::*};
+pub use self::{mqueue::*, msg::*, sem::*, shm::*};
 
 static IPC_ID: AtomicI32 = AtomicI32::new(0);
 
@@ -26,6 +28,7 @@ const IPC_STAT: i32 = 2;
 const IPC_INFO: i32 = 3;
 const MSG_STAT: i32 = 11;
 const MSG_INFO: i32 = 12;
+const MSG_STAT_ANY: i32 = 13;
 
 // Permission bits
 const USER_READ: u32 = 0o400;

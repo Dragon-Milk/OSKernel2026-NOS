@@ -60,6 +60,55 @@ busybox_cmd() {
     fi
 }
 
+prepare_runtime_etc() {
+    bb="$(busybox_cmd)"
+
+    if [ -n "$bb" ]; then
+        "$bb" mkdir -p /etc
+        grep_cmd="$bb grep"
+    else
+        mkdir -p /etc
+        grep_cmd="grep"
+    fi
+
+    if [ ! -s /etc/passwd ]; then
+        {
+            echo 'root:x:0:0:root:/root:/bin/sh'
+            echo 'nobody:x:65534:65534:nobody:/nonexistent:/bin/false'
+        } > /etc/passwd
+    elif ! $grep_cmd -q '^nobody:' /etc/passwd; then
+        echo 'nobody:x:65534:65534:nobody:/nonexistent:/bin/false' >> /etc/passwd
+    fi
+
+    if [ ! -s /etc/group ]; then
+        {
+            echo 'root:x:0:'
+            echo 'nobody:x:65534:'
+        } > /etc/group
+    elif ! $grep_cmd -q '^nobody:' /etc/group; then
+        echo 'nobody:x:65534:' >> /etc/group
+    fi
+}
+
+prepare_ltp_kconfig() {
+    bb="$(busybox_cmd)"
+    config_path=/tmp/ltp-kernel.config
+
+    if [ -n "$bb" ]; then
+        "$bb" mkdir -p /tmp
+    else
+        mkdir -p /tmp
+    fi
+
+    {
+        echo '# Minimal kernel config for LTP feature probing'
+        echo 'CONFIG_CHECKPOINT_RESTORE=y'
+        echo '# CONFIG_HUGETLBFS is not set'
+    } > "$config_path"
+
+    export KCONFIG_PATH="$config_path"
+}
+
 is_leftover_command() {
     case "$1" in
         "./iperf3 -s"*|"iperf3 -s"*|"/glibc/iperf3 -s"*|"/musl/iperf3 -s"*| \
@@ -529,6 +578,9 @@ cd /
 # set_library_path /glibc && cd /glibc && run_with_shell ./unixbench_testcode.sh
 
 # --- full test suite (comment out the single test above) ---
+prepare_runtime_etc
+prepare_ltp_kconfig
+
 found=0
 case "$TEST_PROFILE" in
     stable)

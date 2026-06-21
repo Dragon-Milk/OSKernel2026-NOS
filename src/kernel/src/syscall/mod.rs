@@ -65,6 +65,12 @@ pub fn handle_syscall(uctx: &mut UserContext) {
         #[cfg(target_arch = "x86_64")]
         Sysno::mkdir => sys_mkdir(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::mkdirat => sys_mkdirat(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::mknodat => sys_mknodat(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+        ),
         Sysno::getdents64 => sys_getdents64(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
         #[cfg(target_arch = "x86_64")]
         Sysno::link => sys_link(uctx.arg0() as _, uctx.arg1() as _),
@@ -382,6 +388,7 @@ pub fn handle_syscall(uctx: &mut UserContext) {
             uctx.arg1() as _,
             uctx.arg2() as _,
             uctx.arg3() as _,
+            uctx.arg4(),
         ),
         Sysno::madvise => sys_madvise(uctx.arg0(), uctx.arg1() as _, uctx.arg2() as _),
         Sysno::msync => sys_msync(uctx.arg0(), uctx.arg1() as _, uctx.arg2() as _),
@@ -587,6 +594,54 @@ pub fn handle_syscall(uctx: &mut UserContext) {
             uctx.arg4() as _,
         ),
         Sysno::msgctl => sys_msgctl(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::mq_open => sys_mq_open(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3().into(),
+        ),
+        Sysno::mq_unlink => sys_mq_unlink(uctx.arg0() as _),
+        Sysno::mq_timedsend => sys_mq_timedsend(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4().into(),
+        ),
+        Sysno::mq_timedreceive => sys_mq_timedreceive(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3().into(),
+            uctx.arg4().into(),
+        ),
+        Sysno::mq_notify => sys_mq_notify(uctx.arg0() as _, uctx.arg1()),
+        Sysno::mq_getsetattr => sys_mq_getsetattr(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2().into(),
+        ),
+        Sysno::semget => sys_semget(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::semctl => sys_semctl(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3(),
+        ),
+        Sysno::semtimedop => sys_semtimedop(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3().into(),
+        ),
+        #[cfg(target_arch = "loongarch64")]
+        Sysno::semtimedop_time64 => sys_semtimedop(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3().into(),
+        ),
+        Sysno::semop => sys_semop(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
 
         // shm
         Sysno::shmget => sys_shmget(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
@@ -636,7 +691,28 @@ pub fn handle_syscall(uctx: &mut UserContext) {
             uctx.arg5().into(),
         ),
         Sysno::sendmsg => sys_sendmsg(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
+        Sysno::sendmmsg => sys_sendmmsg(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+        ),
         Sysno::recvmsg => sys_recvmsg(uctx.arg0() as _, uctx.arg1().into(), uctx.arg2() as _),
+        Sysno::recvmmsg => sys_recvmmsg(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4().into(),
+        ),
+        #[cfg(target_arch = "loongarch64")]
+        Sysno::recvmmsg_time64 => sys_recvmmsg(
+            uctx.arg0() as _,
+            uctx.arg1().into(),
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4().into(),
+        ),
         Sysno::getsockopt => sys_getsockopt(
             uctx.arg0() as _,
             uctx.arg1() as _,

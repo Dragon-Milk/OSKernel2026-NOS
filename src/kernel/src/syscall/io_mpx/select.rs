@@ -136,6 +136,9 @@ fn do_select(
 
     let fd_bitmap = read_set.0 | write_set.0 | except_set.0;
     if fd_bitmap.is_empty() {
+        if let Some(timeout) = timeout {
+            block_on(future::sleep(timeout));
+        }
         return Ok(0);
     }
 
@@ -169,6 +172,23 @@ fn do_select(
 
     if ready > 0 || timeout == Some(Duration::ZERO) {
         return Ok(ready as _);
+    }
+
+    if let Some(timeout) = timeout {
+        return with_blocked_signals(sigmask.copied(), || {
+            block_on(future::sleep(timeout));
+            clear_sets(&mut readfds, &mut writefds, &mut exceptfds);
+            let (ready, _) = poll_fds_direct(
+                &fd_bitmap,
+                &read_set,
+                &write_set,
+                &except_set,
+                &mut readfds,
+                &mut writefds,
+                &mut exceptfds,
+            )?;
+            Ok(ready as _)
+        });
     }
 
     // Nothing ready yet, need to wait. Build FdPollSet from all_fds.

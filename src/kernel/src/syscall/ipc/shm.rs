@@ -1,21 +1,47 @@
-use alloc::{collections::btree_map::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{collections::btree_map::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 
-use axerrno::{AxError, AxResult};
+use axerrno::{AxError, AxResult, LinuxError};
+use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+
 use axhal::{
     paging::{MappingFlags, PageSize},
-    time::monotonic_time_nanos,
+    time::{NANOS_PER_SEC, wall_time_nanos},
 };
 use axsync::Mutex;
 use axtask::current;
-use linux_raw_sys::{ctypes::c_ushort, general::*};
+use linux_raw_sys::general::*;
 use memory_addr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use starry_process::Pid;
 
-use super::{IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, IpcPerm, next_ipc_id};
+use super::{
+    IPC_CREAT, IPC_EXCL, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, IpcPerm,
+    has_ipc_permission, next_ipc_id,
+};
 use crate::{
-    mm::{Backend, SharedPages, UserPtr, nullable},
+    mm::{nullable, Backend, SharedPages, UserPtr},
+    syscall::{sys_getegid, sys_geteuid},
     task::AsThread,
 };
+
+
+const SHM_LOCK: i32 = 11;
+const SHM_UNLOCK: i32 = 12;
+const SHM_STAT: i32 = 13;
+const SHM_INFO: i32 = 14;
+const SHM_STAT_ANY: i32 = 15;
+const SHM_DEST: __kernel_mode_t = 0o1000;
+const SHM_LOCKED: __kernel_mode_t = 0o2000;
+const SHM_HUGETLB: usize = 0o4000;
+
+pub const SHMMNI: usize = 4096;
+pub static SHMMNI_LIMIT: AtomicUsize = AtomicUsize::new(SHMMNI);
+pub const SHMMAX: usize = usize::MAX / 2;
+pub static SHMMAX_LIMIT: AtomicUsize = AtomicUsize::new(SHMMAX);
+pub static SHM_NEXT_ID: AtomicI32 = AtomicI32::new(-1);
+
+fn ipc_time_secs() -> __kernel_time_t {
+    (wall_time_nanos() / NANOS_PER_SEC) as __kernel_time_t
+}
 
 bitflags::bitflags! {
     /// flags for sys_shmat
@@ -28,6 +54,17 @@ bitflags::bitflags! {
         /* take-over region on attach */
         const SHM_REMAP = 0o40000;
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ShmInfo {
+    used_ids: i32,
+    shm_tot: __kernel_ulong_t,
+    shm_rss: __kernel_ulong_t,
+    shm_swp: __kernel_ulong_t,
+    swap_attempts: __kernel_ulong_t,
+    swap_successes: __kernel_ulong_t,
 }
 
 /// Data structure describing a shared memory segment.
@@ -49,18 +86,27 @@ pub struct ShmidDs {
     /// pid of last shmop
     shm_lpid: __kernel_pid_t,
     /// number of current attaches
-    shm_nattch: c_ushort,
+    shm_nattch: __kernel_ulong_t,
+    unused4: __kernel_ulong_t,
+    unused5: __kernel_ulong_t,
 }
 
 impl ShmidDs {
-    fn new(key: i32, size: usize, mode: __kernel_mode_t, pid: __kernel_pid_t) -> Self {
+    fn new(
+        key: i32,
+        size: usize,
+        mode: __kernel_mode_t,
+        pid: __kernel_pid_t,
+        uid: u32,
+        gid: u32,
+    ) -> Self {
         Self {
             shm_perm: IpcPerm {
                 key,
-                uid: 0,
-                gid: 0,
-                cuid: 0,
-                cgid: 0,
+                uid,
+                gid,
+                cuid: uid,
+                cgid: gid,
                 mode,
                 seq: 0,
                 pad: 0,
@@ -70,10 +116,12 @@ impl ShmidDs {
             shm_segsz: size as __kernel_size_t,
             shm_atime: 0,
             shm_dtime: 0,
-            shm_ctime: 0,
+            shm_ctime: ipc_time_secs(),
             shm_cpid: pid,
-            shm_lpid: pid,
+            shm_lpid: 0,
             shm_nattch: 0,
+            unused4: 0,
+            unused5: 0,
         }
     }
 }
@@ -97,7 +145,16 @@ pub struct ShmInner {
 
 impl ShmInner {
     /// Creates a new [`ShmInner`].
-    pub fn new(key: i32, shmid: i32, size: usize, mapping_flags: MappingFlags, pid: Pid) -> Self {
+    pub fn new(
+        key: i32,
+        shmid: i32,
+        size: usize,
+        mode: __kernel_mode_t,
+        mapping_flags: MappingFlags,
+        pid: Pid,
+        uid: u32,
+        gid: u32,
+    ) -> Self {
         ShmInner {
             shmid,
             page_num: memory_addr::align_up_4k(size) / PAGE_SIZE_4K,
@@ -108,8 +165,10 @@ impl ShmInner {
             shmid_ds: ShmidDs::new(
                 key,
                 size,
-                mapping_flags.bits() as __kernel_mode_t,
+                mode,
                 pid as __kernel_pid_t,
+                uid,
+                gid,
             ),
         }
     }
@@ -156,7 +215,7 @@ impl ShmInner {
         self.va_range.entry(pid).or_default().push(va_range);
         self.shmid_ds.shm_nattch += 1;
         self.shmid_ds.shm_lpid = pid as __kernel_pid_t;
-        self.shmid_ds.shm_atime = monotonic_time_nanos() as __kernel_time_t;
+        self.shmid_ds.shm_atime = ipc_time_secs();
     }
 
     /// Called by sys_shmdt
@@ -172,7 +231,7 @@ impl ShmInner {
         }
         self.shmid_ds.shm_nattch = self.shmid_ds.shm_nattch.saturating_sub(1);
         self.shmid_ds.shm_lpid = pid as __kernel_pid_t;
-        self.shmid_ds.shm_dtime = monotonic_time_nanos() as __kernel_time_t;
+        self.shmid_ds.shm_dtime = ipc_time_secs();
         Ok(())
     }
 }
@@ -358,6 +417,14 @@ impl ShmManager {
     }
 
     /// Clear all shared memory segments related to the process.
+    pub fn active_count(&self) -> usize {
+        self.shmid_inner.len()
+    }
+
+    pub fn iter_active_segments(&self) -> impl Iterator<Item = (i32, &Arc<Mutex<ShmInner>>)> {
+        self.shmid_inner.iter().map(|(&id, inner)| (id, inner))
+    }
+
     pub fn clear_proc_shm(&mut self, pid: Pid) {
         if let Some(shmaddrs) = self.get_shmaddrs_by_pid(pid) {
             for (shmaddr, shmid) in shmaddrs {
@@ -378,9 +445,66 @@ impl ShmManager {
 pub static SHM_MANAGER: Mutex<ShmManager> = Mutex::new(ShmManager::new());
 
 pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> AxResult<isize> {
-    let page_num = memory_addr::align_up_4k(size) / PAGE_SIZE_4K;
-    if page_num == 0 {
+    if shmflg & SHM_HUGETLB != 0 {
         return Err(AxError::InvalidInput);
+    }
+
+    let current_uid = sys_geteuid()? as u32;
+    let current_gid = sys_getegid()? as u32;
+    let requested_read = shmflg & 0o400 != 0;
+    let requested_write = shmflg & 0o200 != 0;
+
+    let cur_pid = current().as_thread().proc_data.proc.pid();
+    let mut shm_manager = SHM_MANAGER.lock();
+
+    if key != IPC_PRIVATE {
+        if let Some(shmid) = shm_manager.get_shmid_by_key(key) {
+            if shmflg & IPC_CREAT as usize != 0 && shmflg & IPC_EXCL as usize != 0 {
+                return Err(AxError::from(LinuxError::EEXIST));
+            }
+            let shm_inner = shm_manager
+                .get_inner_by_shmid(shmid)
+                .ok_or(AxError::InvalidInput)?;
+            let mut shm_inner = shm_inner.lock();
+            if size > shm_inner.shmid_ds.shm_segsz as usize {
+                return Err(AxError::InvalidInput);
+            }
+            if requested_read
+                && !has_ipc_permission(
+                    &shm_inner.shmid_ds.shm_perm,
+                    current_uid,
+                    current_gid,
+                    false,
+                )
+            {
+                return Err(AxError::PermissionDenied);
+            }
+            if requested_write
+                && !has_ipc_permission(
+                    &shm_inner.shmid_ds.shm_perm,
+                    current_uid,
+                    current_gid,
+                    true,
+                )
+            {
+                return Err(AxError::PermissionDenied);
+            }
+            shm_inner.shmid_ds.shm_lpid = cur_pid as __kernel_pid_t;
+            return Ok(shmid as isize);
+        }
+    }
+
+    if key != IPC_PRIVATE && shmflg & IPC_CREAT as usize == 0 {
+        return Err(AxError::from(LinuxError::ENOENT));
+    }
+
+    let page_num = memory_addr::align_up_4k(size) / PAGE_SIZE_4K;
+    if page_num == 0 || size > SHMMAX_LIMIT.load(Ordering::Relaxed) {
+        return Err(AxError::InvalidInput);
+    }
+
+    if shm_manager.active_count() >= SHMMNI_LIMIT.load(Ordering::Relaxed) {
+        return Err(AxError::from(LinuxError::ENOSPC));
     }
 
     let mut mapping_flags = MappingFlags::from_name("USER").unwrap();
@@ -394,30 +518,31 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> AxResult<isize> {
         mapping_flags.insert(MappingFlags::EXECUTE);
     }
 
-    let cur_pid = current().as_thread().proc_data.proc.pid();
-    let mut shm_manager = SHM_MANAGER.lock();
-
-    if key != IPC_PRIVATE {
-        // This process has already created a shared memory segment with the same key
-        if let Some(shmid) = shm_manager.get_shmid_by_key(key) {
-            let shm_inner = shm_manager
-                .get_inner_by_shmid(shmid)
-                .ok_or(AxError::InvalidInput)?;
-            let mut shm_inner = shm_inner.lock();
-            return shm_inner.try_update(size, mapping_flags, cur_pid);
+    let mode = (shmflg & 0o777) as __kernel_mode_t;
+    let desired_id = SHM_NEXT_ID.swap(-1, Ordering::Relaxed);
+    let shmid = if desired_id >= 0 && shm_manager.get_inner_by_shmid(desired_id).is_none() {
+        desired_id
+    } else {
+        loop {
+            let id = next_ipc_id();
+            if shm_manager.get_inner_by_shmid(id).is_none() {
+                break id;
+            }
         }
-    }
-
-    // Create a new shm_inner
-    let shmid = next_ipc_id();
+    };
     let shm_inner = Arc::new(Mutex::new(ShmInner::new(
         key,
         shmid,
         size,
+        mode,
         mapping_flags,
         cur_pid,
+        current_uid,
+        current_gid,
     )));
-    shm_manager.insert_key_shmid(key, shmid);
+    if key != IPC_PRIVATE {
+        shm_manager.insert_key_shmid(key, shmid);
+    }
     shm_manager.insert_shmid_inner(shmid, shm_inner);
 
     Ok(shmid as isize)
@@ -426,7 +551,9 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: usize) -> AxResult<isize> {
 pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> AxResult<isize> {
     let shm_inner = {
         let shm_manager = SHM_MANAGER.lock();
-        shm_manager.get_inner_by_shmid(shmid).unwrap()
+        shm_manager
+            .get_inner_by_shmid(shmid)
+            .ok_or(AxError::InvalidInput)?
     };
     let mut shm_inner = shm_inner.lock();
     let mut mapping_flags = shm_inner.mapping_flags;
@@ -436,33 +563,48 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> AxResult<isize> {
         mapping_flags.remove(MappingFlags::WRITE);
     }
 
-    // TODO: solve shmflg: SHM_RND and SHM_REMAP
+    // TODO: solve shmflg: SHM_REMAP
 
     let curr = current();
     let proc_data = &curr.as_thread().proc_data;
     let pid = proc_data.proc.pid();
     let mut aspace = proc_data.aspace.lock();
 
-    let start_aligned = memory_addr::align_down_4k(addr);
     let length = shm_inner.page_num * PAGE_SIZE_4K;
 
-    // alloc the virtual address range
-    let start_addr = aspace
-        .find_free_area(
-            VirtAddr::from(start_aligned),
-            length,
-            VirtAddrRange::new(aspace.base(), aspace.end()),
-            PAGE_SIZE_4K,
-        )
-        .or_else(|| {
-            aspace.find_free_area(
+    let start_addr = if addr != 0 {
+        let start = if shm_flg.contains(ShmAtFlags::SHM_RND) {
+            memory_addr::align_down_4k(addr)
+        } else {
+            if addr % PAGE_SIZE_4K != 0 {
+                return Err(AxError::InvalidInput);
+            }
+            addr
+        };
+        let start_addr = VirtAddr::from(start);
+        let end = start.checked_add(length).ok_or(AxError::InvalidInput)?;
+        let end_addr = VirtAddr::from(end);
+        if start_addr < aspace.base() || end_addr > aspace.end() {
+            return Err(AxError::InvalidInput);
+        }
+        let overlaps = aspace.areas().any(|area| {
+            start_addr.as_usize() < area.end().as_usize()
+                && end_addr.as_usize() > area.start().as_usize()
+        });
+        if overlaps && !shm_flg.contains(ShmAtFlags::SHM_REMAP) {
+            return Err(AxError::InvalidInput);
+        }
+        start_addr
+    } else {
+        aspace
+            .find_free_area(
                 aspace.base(),
                 length,
                 VirtAddrRange::new(aspace.base(), aspace.end()),
                 PAGE_SIZE_4K,
             )
-        })
-        .ok_or(AxError::NoMemory)?;
+            .ok_or(AxError::NoMemory)?
+    };
     let end_addr = VirtAddr::from(start_addr.as_usize() + length);
     let va_range = VirtAddrRange::new(start_addr, end_addr);
 
@@ -496,6 +638,51 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> AxResult<isize> {
 }
 
 pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<ShmidDs>) -> AxResult<isize> {
+    let cmd = cmd as i32;
+
+    if cmd == SHM_INFO {
+        let manager = SHM_MANAGER.lock();
+        let used_ids = manager.active_count();
+        let shm_tot: usize = manager
+            .iter_active_segments()
+            .map(|(_, inner)| inner.lock().page_num)
+            .sum();
+        let info = ShmInfo {
+            used_ids: used_ids as i32,
+            shm_tot: shm_tot as __kernel_ulong_t,
+            shm_rss: shm_tot as __kernel_ulong_t,
+            shm_swp: 0,
+            swap_attempts: 0,
+            swap_successes: 0,
+        };
+        let ptr: UserPtr<ShmInfo> = buf.cast();
+        *ptr.get_as_mut()? = info;
+        let highest_id = manager
+            .iter_active_segments()
+            .map(|(id, _)| id as isize)
+            .max()
+            .unwrap_or(0);
+        return Ok(highest_id);
+    }
+
+    if cmd == SHM_STAT || cmd == SHM_STAT_ANY {
+        let shm_manager = SHM_MANAGER.lock();
+        let entry = shm_manager
+            .get_inner_by_shmid(shmid)
+            .map(|inner| (shmid, inner))
+            .or_else(|| {
+                shm_manager
+                    .iter_active_segments()
+                    .nth(shmid as usize)
+                    .map(|(id, inner)| (id, inner.clone()))
+            });
+        let (actual_shmid, shm_inner) = entry.ok_or(AxError::InvalidInput)?;
+        if let Some(shmid_ds) = nullable!(buf.get_as_mut())? {
+            *shmid_ds = shm_inner.lock().shmid_ds;
+        }
+        return Ok(actual_shmid as isize);
+    }
+
     let shm_inner = {
         let shm_manager = SHM_MANAGER.lock();
         shm_manager
@@ -504,21 +691,68 @@ pub fn sys_shmctl(shmid: i32, cmd: u32, buf: UserPtr<ShmidDs>) -> AxResult<isize
     };
     let mut shm_inner = shm_inner.lock();
 
-    let cmd = cmd as i32;
     if cmd == IPC_SET {
-        shm_inner.shmid_ds = *buf.get_as_mut()?;
+        let user_ds = *buf.get_as_mut()?;
+        shm_inner.shmid_ds.shm_perm.uid = user_ds.shm_perm.uid;
+        shm_inner.shmid_ds.shm_perm.gid = user_ds.shm_perm.gid;
+        shm_inner.shmid_ds.shm_perm.mode =
+            (shm_inner.shmid_ds.shm_perm.mode & !(0o777 as __kernel_mode_t))
+                | (user_ds.shm_perm.mode & 0o777);
+        shm_inner.shmid_ds.shm_ctime = ipc_time_secs();
     } else if cmd == IPC_STAT {
         if let Some(shmid_ds) = nullable!(buf.get_as_mut())? {
             *shmid_ds = shm_inner.shmid_ds;
         }
     } else if cmd == IPC_RMID {
         shm_inner.rmid = true;
+        shm_inner.shmid_ds.shm_perm.mode |= SHM_DEST;
+        shm_inner.shmid_ds.shm_ctime = ipc_time_secs();
+        if shm_inner.attach_count() == 0 {
+            drop(shm_inner);
+            SHM_MANAGER.lock().remove_shmid(shmid);
+        }
+    } else if cmd == SHM_LOCK {
+        shm_inner.shmid_ds.shm_perm.mode |= SHM_LOCKED;
+        shm_inner.shmid_ds.shm_ctime = ipc_time_secs();
+    } else if cmd == SHM_UNLOCK {
+        shm_inner.shmid_ds.shm_perm.mode &= !SHM_LOCKED;
+        shm_inner.shmid_ds.shm_ctime = ipc_time_secs();
     } else {
         return Err(AxError::InvalidInput);
     }
 
-    shm_inner.shmid_ds.shm_ctime = monotonic_time_nanos() as __kernel_time_t;
     Ok(0)
+}
+
+pub fn proc_sysvipc_shm() -> String {
+    let manager = SHM_MANAGER.lock();
+    let mut output = String::from(
+        "       key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime        rss       swap\n",
+    );
+    for (id, inner) in manager.iter_active_segments() {
+        let inner = inner.lock();
+        let ds = inner.shmid_ds;
+        output.push_str(&format!(
+            "{:10} {:10} {:5o} {:21} {:5} {:5} {:6} {:5} {:5} {:5} {:5} {:10} {:10} {:10} {:10} {:10}\n",
+            ds.shm_perm.key,
+            id,
+            ds.shm_perm.mode & 0o777,
+            ds.shm_segsz,
+            ds.shm_cpid,
+            ds.shm_lpid,
+            ds.shm_nattch,
+            ds.shm_perm.uid,
+            ds.shm_perm.gid,
+            ds.shm_perm.cuid,
+            ds.shm_perm.cgid,
+            ds.shm_atime,
+            ds.shm_dtime,
+            ds.shm_ctime,
+            inner.page_num * PAGE_SIZE_4K,
+            0,
+        ));
+    }
+    output
 }
 
 // Garbage collection for shared memory:

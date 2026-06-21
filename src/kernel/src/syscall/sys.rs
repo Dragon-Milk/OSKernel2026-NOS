@@ -10,31 +10,33 @@ use linux_raw_sys::{
 };
 use starry_vm::{VmMutPtr, vm_write_slice};
 
-use crate::task::processes;
+use crate::task::{AsThread, processes};
 
 pub fn sys_getuid() -> AxResult<isize> {
-    Ok(0)
+    Ok(axtask::current().as_thread().proc_data.uid() as isize)
 }
 
 pub fn sys_geteuid() -> AxResult<isize> {
-    Ok(0)
+    Ok(axtask::current().as_thread().proc_data.euid() as isize)
 }
 
 pub fn sys_getgid() -> AxResult<isize> {
-    Ok(0)
+    Ok(axtask::current().as_thread().proc_data.gid() as isize)
 }
 
 pub fn sys_getegid() -> AxResult<isize> {
+    Ok(axtask::current().as_thread().proc_data.egid() as isize)
+}
+
+pub fn sys_setuid(uid: u32) -> AxResult<isize> {
+    debug!("sys_setuid <= uid: {uid}");
+    axtask::current().as_thread().proc_data.set_uid(uid);
     Ok(0)
 }
 
-pub fn sys_setuid(_uid: u32) -> AxResult<isize> {
-    debug!("sys_setuid <= uid: {_uid}");
-    Ok(0)
-}
-
-pub fn sys_setgid(_gid: u32) -> AxResult<isize> {
-    debug!("sys_setgid <= gid: {_gid}");
+pub fn sys_setgid(gid: u32) -> AxResult<isize> {
+    debug!("sys_setgid <= gid: {gid}");
+    axtask::current().as_thread().proc_data.set_gid(gid);
     Ok(0)
 }
 

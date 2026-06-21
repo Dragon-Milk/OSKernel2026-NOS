@@ -113,6 +113,12 @@ pub enum Backend {
     File(file::FileBackend),
 }
 
+impl Backend {
+    pub fn is_shared_mapping(&self) -> bool {
+        matches!(self, Backend::Shared(_) | Backend::File(_))
+    }
+}
+
 impl MappingBackend for Backend {
     type Addr = VirtAddr;
     type Flags = MappingFlags;

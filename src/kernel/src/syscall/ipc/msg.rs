@@ -1,9 +1,10 @@
-use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
+use core::{sync::atomic::{AtomicI32, AtomicUsize, Ordering}, time::Duration};
 
 use axerrno::{AxError, AxResult, LinuxError};
-use axhal::time::monotonic_time_nanos;
+use axhal::time::{NANOS_PER_SEC, wall_time_nanos};
 use axsync::Mutex;
-use axtask::current;
+use axtask::{current, future::{block_on, interruptible, sleep}};
 use bytemuck::AnyBitPattern;
 use linux_raw_sys::general::*;
 use starry_process::Pid;
@@ -11,12 +12,16 @@ use starry_vm::{VmMutPtr, VmPtr, vm_load, vm_write_slice};
 
 use super::{
     IPC_CREAT, IPC_EXCL, IPC_INFO, IPC_PRIVATE, IPC_RMID, IPC_SET, IPC_STAT, IpcPerm, MSG_INFO,
-    MSG_STAT, has_ipc_permission, next_ipc_id,
+    MSG_STAT, MSG_STAT_ANY, has_ipc_permission, next_ipc_id,
 };
 use crate::{
-    syscall::{sys_getgid, sys_getuid},
+    syscall::{sys_getegid, sys_geteuid},
     task::AsThread,
 };
+
+fn ipc_time_secs() -> __kernel_time_t {
+    (wall_time_nanos() / NANOS_PER_SEC) as __kernel_time_t
+}
 
 /// Data structure describing a message queue.
 #[repr(C)]
@@ -44,7 +49,7 @@ pub struct msqid_ds {
 }
 
 impl msqid_ds {
-    fn new(key: i32, mode: __kernel_mode_t, pid: __kernel_pid_t, uid: u32, gid: u32) -> Self {
+    fn new(key: i32, mode: __kernel_mode_t, _pid: __kernel_pid_t, uid: u32, gid: u32) -> Self {
         Self {
             msg_perm: IpcPerm {
                 key,
@@ -60,12 +65,12 @@ impl msqid_ds {
             },
             msg_stime: 0,
             msg_rtime: 0,
-            msg_ctime: monotonic_time_nanos() as __kernel_time_t,
+            msg_ctime: ipc_time_secs(),
             msg_cbytes: 0,
             msg_qnum: 0,
             msg_qbytes: MSGMNB as __kernel_size_t,
-            msg_lspid: pid,
-            msg_lrpid: pid,
+            msg_lspid: 0,
+            msg_lrpid: 0,
         }
     }
 }
@@ -181,6 +186,11 @@ impl MessageQueue {
         self.messages.values().map(|msgs| msgs.len()).sum()
     }
 
+    fn can_enqueue(&self, len: usize) -> bool {
+        self.total_bytes + len <= self.msqid_ds.msg_qbytes as usize
+            && (self.msqid_ds.msg_qnum + 1) as usize <= self.msqid_ds.msg_qbytes as usize
+    }
+
     /// Get message by index (for MSG_COPY)
     pub fn get_message_by_index(&self, index: usize) -> Option<&Message> {
         let mut current_index = 0;
@@ -279,6 +289,9 @@ impl MsgManager {
 
     /// Remove a message queue
     pub fn remove_msqid(&mut self, msqid: i32) {
+        if let Some(queue) = self.msqid_queues.get(&msqid) {
+            queue.lock().mark_removed = true;
+        }
         self.key_msqid.retain(|_, &mut v| v != msqid);
         self.msqid_queues.remove(&msqid);
     }
@@ -295,8 +308,10 @@ impl MsgManager {
 }
 
 /// System limits
-/// Maximum number of message queues
+/// Default maximum number of message queues.
 pub const MSGMNI: usize = 32000;
+pub static MSGMNI_LIMIT: AtomicUsize = AtomicUsize::new(MSGMNI);
+pub static MSG_NEXT_ID: AtomicI32 = AtomicI32::new(-1);
 /// Maximum bytes in a message queue
 pub const MSGMNB: usize = 16384;
 /// Maximum size of a single message
@@ -304,6 +319,20 @@ pub const MSGMAX: usize = 8192;
 
 /// Global message queue manager
 pub static MSG_MANAGER: Mutex<MsgManager> = Mutex::new(MsgManager::new());
+
+fn alloc_msg_id(msg_manager: &MsgManager) -> i32 {
+    let desired_id = MSG_NEXT_ID.swap(-1, Ordering::Relaxed);
+    if desired_id >= 0 && msg_manager.get_queue_by_msqid(desired_id).is_none() {
+        desired_id
+    } else {
+        loop {
+            let id = next_ipc_id();
+            if msg_manager.get_queue_by_msqid(id).is_none() {
+                break id;
+            }
+        }
+    }
+}
 
 bitflags::bitflags! {
     /// Flags for msgrcv
@@ -314,9 +343,9 @@ bitflags::bitflags! {
         /// Truncate message if too long (instead of failing)
         const MSG_NOERROR = 0o10000;
         /// For internal use - mark as COPIED
-        const MSG_COPY = 0o20000;
+        const MSG_COPY = 0o40000;
         /// Receive any message except of specified type (Linux extension)
-        const MSG_EXCEPT = 0o2000;
+        const MSG_EXCEPT = 0o20000;
     }
 }
 
@@ -336,24 +365,37 @@ pub struct UserMsgbuf {
     pub mtext: [u8; 0], // actual data, use zero-sized array to simulate flexible array
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MsgInfo {
+    msgpool: i32,
+    msgmap: i32,
+    msgmax: i32,
+    msgmnb: i32,
+    msgmni: i32,
+    msgssz: i32,
+    msgtql: i32,
+    msgseg: u16,
+}
+
 pub fn sys_msgget(key: i32, msgflg: i32) -> AxResult<isize> {
     let current = current();
     let thread = current.as_thread();
     let proc_data = &thread.proc_data;
-    let current_uid = sys_getuid()? as u32;
-    let current_gid = sys_getgid()? as u32;
+    let current_uid = sys_geteuid()? as u32;
+    let current_gid = sys_getegid()? as u32;
     let current_pid = proc_data.proc.pid();
 
     let mut msg_manager = MSG_MANAGER.lock();
 
     // Check system limit
-    if msg_manager.queue_count() >= MSGMNI {
+    if msg_manager.queue_count() >= MSGMNI_LIMIT.load(Ordering::Relaxed) {
         return Err(AxError::from(LinuxError::ENOSPC)); // ENOSPC
     }
 
     // Handle IPC_PRIVATE (always create new queue)
     if key == IPC_PRIVATE {
-        let msqid = next_ipc_id();
+        let msqid = alloc_msg_id(&msg_manager);
         let msg_queue = Arc::new(Mutex::new(MessageQueue::new(
             key,
             (msgflg & 0o777) as _,
@@ -386,15 +428,36 @@ pub fn sys_msgget(key: i32, msgflg: i32) -> AxResult<isize> {
 
         // Check if marked for removal
         if msg_queue.mark_removed {
-            return Err(AxError::from(LinuxError::EIDRM)); // EIDRM
+            if (msgflg & IPC_CREAT) == 0 {
+                return Err(AxError::from(LinuxError::EIDRM)); // EIDRM
+            }
+        } else {
+            // Check IPC_EXCL flag
+            if (msgflg & IPC_EXCL) != 0 && (msgflg & IPC_CREAT) != 0 {
+                return Err(AxError::from(LinuxError::EEXIST)); // EEXIST
+            }
+
+            return Ok(msqid as isize);
         }
 
-        // Check IPC_EXCL flag
-        if (msgflg & IPC_EXCL) != 0 && (msgflg & IPC_CREAT) != 0 {
-            return Err(AxError::from(LinuxError::EEXIST)); // EEXIST
+        drop(msg_queue);
+        msg_manager.remove_msqid(msqid);
+
+        if (msgflg & IPC_CREAT) == 0 {
+            return Err(AxError::from(LinuxError::ENOENT));
         }
 
-        return Ok(msqid as isize);
+        let new_msqid = alloc_msg_id(&msg_manager);
+        let msg_queue = Arc::new(Mutex::new(MessageQueue::new(
+            key,
+            (msgflg & 0o777) as _,
+            current_pid,
+            current_uid,
+            current_gid,
+        )));
+        msg_manager.insert_key_msqid(key, new_msqid);
+        msg_manager.insert_msqid_queues(new_msqid, msg_queue);
+        return Ok(new_msqid as isize);
     }
 
     // Create new message queue
@@ -402,7 +465,7 @@ pub fn sys_msgget(key: i32, msgflg: i32) -> AxResult<isize> {
         return Err(AxError::from(LinuxError::ENOENT)); // ENOENT
     }
 
-    let msqid = next_ipc_id();
+    let msqid = alloc_msg_id(&msg_manager);
     let msg_queue = Arc::new(Mutex::new(MessageQueue::new(
         key,
         (msgflg & 0o777) as _,
@@ -423,15 +486,15 @@ pub fn sys_msgsnd(
     msgsz: usize,
     msgflg: i32,
 ) -> AxResult<isize> {
-    // MSGMAX = 8192
     if msgsz > MSGMAX {
-        return Err(AxError::from(LinuxError::EINVAL)); // EINVAL
+        return Err(AxError::from(LinuxError::EINVAL));
     }
+
     let current = current();
     let thread = current.as_thread();
     let proc_data = &thread.proc_data;
-    let current_uid = sys_getuid()? as u32;
-    let current_gid = sys_getgid()? as u32;
+    let current_uid = sys_geteuid()? as u32;
+    let current_gid = sys_getegid()? as u32;
     let current_pid = proc_data.proc.pid();
     let flags = MsgSndFlags::from_bits_truncate(msgflg);
 
@@ -439,75 +502,48 @@ pub fn sys_msgsnd(
         let msg_manager = MSG_MANAGER.lock();
         msg_manager
             .get_queue_by_msqid(msqid)
-            .ok_or(AxError::from(LinuxError::EINVAL))? // EINVAL - queue does not exist
+            .ok_or(AxError::from(LinuxError::EINVAL))?
     };
 
-    let mut msg_queue = msg_queue.lock();
-
-    if !has_ipc_permission(
-        &msg_queue.msqid_ds.msg_perm,
-        current_uid as _,
-        current_gid as _,
-        true,
-    ) {
-        return Err(AxError::from(LinuxError::EACCES)); // EACCES
-    }
-
-    // read message from user space
     let mtype_ptr = unsafe { core::ptr::addr_of!((*msgp).mtype) };
     let mtype: i64 = mtype_ptr.vm_read()?;
-
     if mtype <= 0 {
-        return Err(AxError::from(LinuxError::EINVAL)); // EINVAL - invalid message type
+        return Err(AxError::from(LinuxError::EINVAL));
     }
 
-    // read data part
     let mtext_ptr = unsafe { core::ptr::addr_of!((*msgp).mtext) };
     let data_vec = vm_load(mtext_ptr.cast::<u8>(), msgsz)?;
 
-    // check if the message queue is marked for removal
-    // Note: According to Linux manpage, both byte count and message count
-    // are limited by msg_qbytes field (this appears to be the actual behavior)
-    let would_exceed_bytes =
-        msg_queue.total_bytes + data_vec.len() > msg_queue.msqid_ds.msg_qbytes as usize;
-    let would_exceed_messages =
-        (msg_queue.msqid_ds.msg_qnum + 1) as usize > msg_queue.msqid_ds.msg_qbytes as usize;
-
-    if would_exceed_bytes || would_exceed_messages {
-        // If the non-blocking flag is specified, return an error immediately
-        if flags.contains(MsgSndFlags::IPC_NOWAIT) {
-            return Err(AxError::from(LinuxError::EAGAIN)); // EAGAIN
+    loop {
+        let mut msg_queue = msg_queue.lock();
+        if msg_queue.mark_removed {
+            return Err(AxError::from(LinuxError::EIDRM));
+        }
+        if !has_ipc_permission(
+            &msg_queue.msqid_ds.msg_perm,
+            current_uid,
+            current_gid,
+            true,
+        ) {
+            return Err(AxError::from(LinuxError::EACCES));
         }
 
-        // TODO:
-        warn!("sys_msgsnd: blocking send not implemented, returning EAGAIN");
-        // Otherwise, block and wait (blocking logic needs to be implemented
-        // here) In the actual implementation, this should:
-        // - Add the current task to the wait queue
-        // - Yield the CPU and wait to be woken up when there is space in the
-        //   queue
-        // - After being woken up, recheck the condition
-        // Note: It may be interrupted by a signal returning EINTR, or the queue
-        // may be deleted returning EIDRM
+        if msg_queue.can_enqueue(data_vec.len()) {
+            msg_queue.enqueue_message(mtype, data_vec.clone())?;
+            msg_queue.msqid_ds.msg_lspid = current_pid as _;
+            msg_queue.msqid_ds.msg_stime = ipc_time_secs() as _;
+            return Ok(0);
+        }
 
-        return Err(AxError::from(LinuxError::EAGAIN)); // EAGAIN
+        if flags.contains(MsgSndFlags::IPC_NOWAIT) {
+            return Err(AxError::from(LinuxError::EAGAIN));
+        }
+
+        drop(msg_queue);
+        if block_on(interruptible(sleep(Duration::from_millis(10)))).is_err() {
+            return Err(AxError::Interrupted);
+        }
     }
-
-    msg_queue.enqueue_message(mtype, data_vec)?;
-
-    msg_queue.msqid_ds.msg_lspid = current_pid as _;
-
-    msg_queue.msqid_ds.msg_stime = monotonic_time_nanos() as _;
-
-    // note:msg_qnum and msg_cbytes updated in enqueue_message
-
-    // TODO:
-    warn!("sys_msgsnd: wakeup of waiting receivers not implemented");
-    // If there are processes waiting to receive messages, wake them up
-    // In the actual implementation, this should:
-    // - Check if there are tasks in the message queue's wait queue
-    // - If so, wake up these tasks
-    Ok(0)
 }
 
 pub fn sys_msgrcv(
@@ -517,159 +553,103 @@ pub fn sys_msgrcv(
     msgtyp: i64,
     msgflg: i32,
 ) -> AxResult<isize> {
-    // Parse flags and get current process information
+    if msgsz > isize::MAX as usize {
+        return Err(AxError::from(LinuxError::EINVAL));
+    }
 
     let flags = MsgRcvFlags::from_bits_truncate(msgflg);
     let current = current();
     let thread = current.as_thread();
     let proc_data = &thread.proc_data;
-    let current_uid = sys_getuid()? as u32;
-    let current_gid = sys_getgid()? as u32;
+    let current_uid = sys_geteuid()? as u32;
+    let current_gid = sys_getegid()? as u32;
     let current_pid = proc_data.proc.pid();
 
-    // Check validity of flag combinations
     if flags.contains(MsgRcvFlags::MSG_COPY) {
-        if !flags.contains(MsgRcvFlags::IPC_NOWAIT) {
-            return Err(AxError::from(LinuxError::EINVAL)); // EINVAL - MSG_COPY must be used with IPC_NOWAIT
-        }
-        if flags.contains(MsgRcvFlags::MSG_EXCEPT) {
-            return Err(AxError::from(LinuxError::EINVAL)); // EINVAL - MSG_COPY and MSG_EXCEPT are mutually exclusive
+        if !flags.contains(MsgRcvFlags::IPC_NOWAIT)
+            || flags.contains(MsgRcvFlags::MSG_EXCEPT)
+        {
+            return Err(AxError::from(LinuxError::EINVAL));
         }
     }
 
-    // Get the message queue
     let msg_queue = {
         let msg_manager = MSG_MANAGER.lock();
         msg_manager
             .get_queue_by_msqid(msqid)
-            .ok_or(AxError::from(LinuxError::EINVAL))? // EINVAL
+            .ok_or(AxError::from(LinuxError::EINVAL))?
     };
 
-    let mut msg_queue = msg_queue.lock();
-
-    // Permission check
-    if !has_ipc_permission(
-        &msg_queue.msqid_ds.msg_perm,
-        current_uid as _,
-        current_gid as _,
-        false,
-    ) {
-        return Err(AxError::from(LinuxError::EACCES)); // EACCES
-    }
-
-    if msg_queue.mark_removed {
-        return Err(AxError::from(LinuxError::EIDRM)); // EIDRM
-    }
-
-    // Message matching logic (distinguish between MSG_COPY and normal mode)
-    let (mtype, data_slice, index, should_remove) = if flags.contains(MsgRcvFlags::MSG_COPY) {
-        // MSG_COPY mode: msgtyp is the message index
-        let index = msgtyp as usize;
-
-        // Check if the index is valid
-        if index >= msg_queue.get_total_message_count() {
-            return Err(AxError::from(LinuxError::ENOMSG)); // ENOMSG - index out of range
+    loop {
+        let mut msg_queue = msg_queue.lock();
+        if msg_queue.mark_removed {
+            return Err(AxError::from(LinuxError::EIDRM));
+        }
+        if !has_ipc_permission(
+            &msg_queue.msqid_ds.msg_perm,
+            current_uid,
+            current_gid,
+            false,
+        ) {
+            return Err(AxError::from(LinuxError::EACCES));
         }
 
-        // Get a copy of the message (do not remove)
-        let message = msg_queue
-            .get_message_by_index(index)
-            .ok_or(AxError::from(LinuxError::ENOMSG))?; // ENOMSG
-
-        (message.mtype, &message.data[..], index, false) // should_remove = false
-    } else {
-        // Normal mode: msgtyp is the message type
-        let matched_message = match msgtyp {
-            0 => msg_queue.find_first_message(), // First message
-            typ if typ > 0 => {
-                if flags.contains(MsgRcvFlags::MSG_EXCEPT) {
-                    msg_queue.find_message_not_equal(typ) // Type not equal to msgtyp
-                } else {
-                    msg_queue.find_message_by_type(typ) // Type equal to msgtyp
-                }
-            }
-            typ if typ < 0 => {
-                let abs_typ = typ.abs();
-                msg_queue.find_message_less_equal(abs_typ) // Type ≤ |msgtyp|
-            }
-            _ => None,
-        };
-
-        // Index is always 0 in normal mode
-        let index = 0;
-
-        // Handle no message situation
-        let (mtype, data_slice) = match matched_message {
-            Some((mtype, data_slice)) => (mtype, data_slice),
-            None => {
-                if flags.contains(MsgRcvFlags::IPC_NOWAIT) {
-                    return Err(AxError::from(LinuxError::ENOMSG)); // ENOMSG
-                }
-
-                // TODO:
-                warn!("sys_msgrcv: blocking receive not implemented, returning ENOMSG");
-                // The complete implementation should:
-                // - Add the current task to the receive wait queue
-                // - Block and wait, possibly interrupted by signals (EINTR) or queue removal
-                //   (EIDRM)
-                // Simplified: blocking is not supported, directly return an error
-                return Err(AxError::from(LinuxError::ENOMSG)); // ENOMSG
-            }
-        };
-
-        (mtype, data_slice, index, true) // should_remove = true
-    };
-
-    // Message size check
-    if data_slice.len() > msgsz {
-        if flags.contains(MsgRcvFlags::MSG_NOERROR) {
-            // MSG_NOERROR: Truncate the message and continue
+        let selected = if flags.contains(MsgRcvFlags::MSG_COPY) {
+            let index = msgtyp as usize;
+            let message = msg_queue
+                .get_message_by_index(index)
+                .ok_or(AxError::from(LinuxError::ENOMSG))?;
+            Some((message.mtype, message.data.clone(), index, false))
         } else {
-            // Without MSG_NOERROR: return an error
-            // Note: If in normal mode, the message has not been removed, so no need to
-            // restore
-            return Err(AxError::from(LinuxError::E2BIG)); // E2BIG
+            let matched_message = match msgtyp {
+                0 => msg_queue.find_first_message(),
+                typ if typ > 0 => {
+                    if flags.contains(MsgRcvFlags::MSG_EXCEPT) {
+                        msg_queue.find_message_not_equal(typ)
+                    } else {
+                        msg_queue.find_message_by_type(typ)
+                    }
+                }
+                typ if typ < 0 => msg_queue.find_message_less_equal(typ.abs()),
+                _ => None,
+            };
+            matched_message.map(|(mtype, data)| (mtype, data.to_vec(), 0, true))
+        };
+
+        let Some((mtype, data, index, should_remove)) = selected else {
+            if flags.contains(MsgRcvFlags::IPC_NOWAIT) {
+                return Err(AxError::from(LinuxError::ENOMSG));
+            }
+            drop(msg_queue);
+            if block_on(interruptible(sleep(Duration::from_millis(10)))).is_err() {
+                return Err(AxError::Interrupted);
+            }
+            continue;
+        };
+
+        if data.len() > msgsz && !flags.contains(MsgRcvFlags::MSG_NOERROR) {
+            return Err(AxError::from(LinuxError::E2BIG));
         }
-    }
 
-    // Write mtype
-    let mtype_ptr = unsafe { core::ptr::addr_of_mut!((*msgp).mtype) };
-    mtype_ptr.vm_write(mtype)?;
+        let copy_len = data.len().min(msgsz);
+        let mtype_ptr = unsafe { core::ptr::addr_of_mut!((*msgp).mtype) };
+        mtype_ptr.vm_write(mtype)?;
+        let data_ptr = unsafe { core::ptr::addr_of_mut!((*msgp).mtext) };
+        vm_write_slice(data_ptr.cast::<u8>(), &data[..copy_len])?;
 
-    // Write data part
-    let data_ptr = unsafe { core::ptr::addr_of_mut!((*msgp).mtext) };
-    let copy_len = data_slice.len().min(msgsz);
-    vm_write_slice(data_ptr.cast::<u8>(), &data_slice[..copy_len])?;
-
-    // Remove the message from the queue (normal mode only)
-    if should_remove {
-        msg_queue.remove_message_by_type_and_index(mtype, index)?;
-    }
-
-    // Update queue statistics (normal mode only)
-    if should_remove {
+        if should_remove {
+            msg_queue.remove_message_by_type_and_index(mtype, index)?;
+        }
         msg_queue.msqid_ds.msg_lrpid = current_pid as _;
-        msg_queue.msqid_ds.msg_rtime = monotonic_time_nanos() as _;
-
-        // TODO:
-        warn!("sys_msgrcv: wakeup of waiting senders not implemented");
-        // Wake up waiting senders (Simplified: not implemented)
-        // while let Some(task) = msg_queue.send_wait_queue.pop_front() {
-        //     wakeup(task);
-        // }
-    } else {
-        // MSG_COPY mode: only update last receiver info, do not update queue statistics
-        msg_queue.msqid_ds.msg_lrpid = current_pid as _;
-        msg_queue.msqid_ds.msg_rtime = monotonic_time_nanos() as _;
+        msg_queue.msqid_ds.msg_rtime = ipc_time_secs() as _;
+        return Ok(copy_len as isize);
     }
-
-    Ok(copy_len as isize)
 }
 
 pub fn sys_msgctl(msqid: i32, cmd: i32, buf: usize) -> AxResult<isize> {
     //  Get current process information
-    let current_uid = sys_getuid()? as u32;
-    let current_gid = sys_getgid()? as u32;
+    let current_uid = sys_geteuid()? as u32;
+    let current_gid = sys_getegid()? as u32;
     let is_privileged = current_uid == 0; // root user check
 
     // Validate command code
@@ -679,109 +659,82 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: usize) -> AxResult<isize> {
         && cmd != IPC_INFO
         && cmd != MSG_INFO
         && cmd != MSG_STAT
+        && cmd != MSG_STAT_ANY
     {
         // Simplified: do not support some Linux extensions
         return Err(AxError::from(LinuxError::EINVAL)); // EINVAL
     }
 
-    // IPC_INFO (put before looking up the queue!)
-    if cmd == IPC_INFO {
-        // IPC_INFO uses msqid=0, no actual queue needed
-        // Return system-level information
-        #[repr(C)]
-        struct MsgInfo {
-            msgpool: i32,
-            msgmap: i32,
-            msgmax: i32,
-            msgmnb: i32,
-            msgmni: i32,
-            msgssz: i32,
-            msgtql: i32,
-            msgseg: u16,
-        }
-
+    // IPC_INFO/MSG_INFO (put before looking up the queue!)
+    if cmd == IPC_INFO || cmd == MSG_INFO {
+        let msg_manager = MSG_MANAGER.lock();
+        let queue_count = msg_manager.iter_active_queues().count();
+        let message_count: usize = msg_manager
+            .iter_active_queues()
+            .map(|(_, queue)| queue.lock().msqid_ds.msg_qnum as usize)
+            .sum();
+        let total_bytes = msg_manager.total_bytes();
         let info = MsgInfo {
-            msgpool: 0,
-            msgmap: 0,
+            msgpool: if cmd == MSG_INFO { queue_count as i32 } else { 0 },
+            msgmap: if cmd == MSG_INFO { message_count as i32 } else { 0 },
             msgmax: MSGMAX as i32,
             msgmnb: MSGMNB as i32,
-            msgmni: MSGMNI as i32,
+            msgmni: MSGMNI_LIMIT.load(Ordering::Relaxed) as i32,
             msgssz: 0,
-            msgtql: 0,
+            msgtql: if cmd == MSG_INFO { total_bytes as i32 } else { 0 },
             msgseg: 0,
         };
 
-        // Copy to user space
         let ptr = buf as *mut MsgInfo;
         ptr.vm_write(info)?;
-        return Ok(0);
-    }
-
-    // MSG_INFO (put before looking up the queue!)
-    if cmd == MSG_INFO {
-        let msg_manager = MSG_MANAGER.lock();
-        // Manually create IpcPerm
-        let msg_perm = IpcPerm {
-            key: 0,
-            uid: current_uid,
-            gid: current_gid,
-            cuid: current_uid,
-            cgid: current_gid,
-            mode: 0o600,
-            pad: 0,
-            seq: 0,
-            unused0: 0,
-            unused1: 0,
-        };
-
-        // Create a temporary msqid_ds to return information
-        let info_ds = msqid_ds {
-            msg_perm,
-            msg_stime: 0,
-            msg_rtime: 0,
-            msg_ctime: 0,
-            msg_cbytes: msg_manager.total_bytes() as u64,
-            // Use msg_qnum to return the number of allocated queues
-            msg_qnum: msg_manager.queue_count() as u64,
-            // Use msg_qbytes to return system limits or usage
-            msg_qbytes: MSGMNB as u64,
-            msg_lspid: Pid::from(0u32) as _,
-            msg_lrpid: Pid::from(0u32) as _,
-        };
-
-        // Copy to user space
-        let ptr = buf as *mut msqid_ds;
-        ptr.vm_write(info_ds)?;
-
-        // Return the current number of allocated queues
-        return Ok(msg_manager.queue_count() as isize);
-    }
-    // MSG_STAT handling
-    if cmd == MSG_STAT {
-        let msg_manager = MSG_MANAGER.lock();
-
-        let result = msg_manager
+        let highest_id = msg_manager
             .iter_active_queues()
-            .nth(msqid as usize)
-            .ok_or(AxError::from(LinuxError::EINVAL))
-            .and_then(|(actual_msqid, queue)| {
-                let guard = queue.lock();
+            .map(|(id, _)| id as isize)
+            .max()
+            .unwrap_or(0);
+        return Ok(highest_id);
+    }
+    // MSG_STAT/MSG_STAT_ANY handling
+    if cmd == MSG_STAT || cmd == MSG_STAT_ANY {
+        if msqid < 0 {
+            return Err(AxError::from(LinuxError::EINVAL));
+        }
+        let msg_manager = MSG_MANAGER.lock();
 
-                if !has_ipc_permission(
-                    &guard.msqid_ds.msg_perm,
-                    current_uid,
-                    current_gid,
-                    false, // read permission check
-                ) {
-                    return Err(AxError::from(LinuxError::EACCES));
-                }
+        let (actual_msqid, queue) = if cmd == MSG_STAT_ANY {
+            msg_manager
+                .get_queue_by_msqid(msqid)
+                .map(|queue| (msqid, queue))
+                .or_else(|| {
+                    msg_manager
+                        .iter_active_queues()
+                        .nth(msqid as usize)
+                        .map(|(id, queue)| (id, queue.clone()))
+                })
+                .ok_or(AxError::from(LinuxError::EINVAL))?
+        } else {
+            msg_manager
+                .iter_active_queues()
+                .nth(msqid as usize)
+                .map(|(id, queue)| (id, queue.clone()))
+                .ok_or(AxError::from(LinuxError::EINVAL))?
+        };
+        let guard = queue.lock();
 
-                let ptr = buf as *mut msqid_ds;
-                ptr.vm_write(guard.msqid_ds)?;
-                Ok(actual_msqid as isize)
-            });
+        if cmd == MSG_STAT
+            && !has_ipc_permission(
+                &guard.msqid_ds.msg_perm,
+                current_uid,
+                current_gid,
+                false, // read permission check
+            )
+        {
+            return Err(AxError::from(LinuxError::EACCES));
+        }
 
-        return result;
+        let ptr = buf as *mut msqid_ds;
+        ptr.vm_write(guard.msqid_ds)?;
+        return Ok(actual_msqid as isize);
     }
 
     // Find message queue by msqid
@@ -843,36 +796,13 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: usize) -> AxResult<isize> {
         }
 
         // Update modification time
-        msg_queue.msqid_ds.msg_ctime = monotonic_time_nanos() as _;
+        msg_queue.msqid_ds.msg_ctime = ipc_time_secs() as _;
 
         return Ok(0);
     }
     if cmd == IPC_RMID {
-        // Mark the queue as removed
-        msg_queue.mark_removed = true;
-
-        // If the queue is empty, delete it immediately
-        if msg_queue.msqid_ds.msg_qnum == 0 {
-            drop(msg_queue); // Release the lock to avoid deadlock
-
-            MSG_MANAGER.lock().remove_msqid(msqid);
-
-            // TODO:
-            warn!(
-                "sys_msgctl[IPC_RMID]: wakeup of waiting processes after queue deletion not \
-                 implemented"
-            );
-            // Wake up all waiting processes (simplified: not implemented yet)
-            // According to man-page: wake up all waiting readers and writers (returning
-            // EIDRM error)
-
-            return Ok(0);
-        }
-
-        // If the queue is not empty, only mark it as removed and wait for all messages
-        // to be taken before automatic deletion Update modification time
-        msg_queue.msqid_ds.msg_ctime = monotonic_time_nanos() as _;
-
+        drop(msg_queue);
+        MSG_MANAGER.lock().remove_msqid(msqid);
         return Ok(0);
     }
     // Currently unsupported operations
@@ -881,4 +811,34 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: usize) -> AxResult<isize> {
     // operations are sufficient and these are not POSIX standard They can be
     // implemented later to support tools like ipcs
     Err(AxError::from(LinuxError::EINVAL)) // EINVAL
+}
+
+
+pub fn proc_sysvipc_msg() -> String {
+    let manager = MSG_MANAGER.lock();
+    let mut output = String::from(
+        "       key      msqid perms      cbytes       qnum lspid lrpid   uid   gid  cuid  cgid      stime      rtime      ctime\n",
+    );
+    for (id, queue) in manager.iter_active_queues() {
+        let queue = queue.lock();
+        let ds = queue.msqid_ds;
+        output.push_str(&format!(
+            "{:10} {:10} {:5o} {:11} {:10} {:5} {:5} {:5} {:5} {:5} {:5} {:10} {:10} {:10}\n",
+            ds.msg_perm.key,
+            id,
+            ds.msg_perm.mode & 0o777,
+            ds.msg_cbytes,
+            ds.msg_qnum,
+            ds.msg_lspid,
+            ds.msg_lrpid,
+            ds.msg_perm.uid,
+            ds.msg_perm.gid,
+            ds.msg_perm.cuid,
+            ds.msg_perm.cgid,
+            ds.msg_stime,
+            ds.msg_rtime,
+            ds.msg_ctime,
+        ));
+    }
+    output
 }

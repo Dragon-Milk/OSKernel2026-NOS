@@ -75,6 +75,15 @@ mod conv {
     }
 }
 
+fn unsupported_getsockopt_error(level: u32, _optname: u32) -> AxError {
+    use linux_raw_sys::net::*;
+
+    match level {
+        SOL_SOCKET | PROTO_IP | PROTO_TCP => AxError::from(LinuxError::ENOPROTOOPT),
+        _ => AxError::OperationNotSupported,
+    }
+}
+
 macro_rules! call_dispatch {
     ($dispatch:ident, $pat:expr) => {{
         use conv::*;
@@ -107,7 +116,7 @@ macro_rules! call_dispatch {
                     dispatch!($which $(as $conv)?);
                 }
             )*
-            _ => return Err(AxError::from(LinuxError::ENOPROTOOPT)),
+            _ => return Err(unsupported_getsockopt_error($in.0, $in.1)),
         }
     }
 }
@@ -130,7 +139,7 @@ pub fn sys_getsockopt(
     );
 
     fn get<'a, T: 'static>(val: UserPtr<u8>, len: &mut socklen_t) -> AxResult<&'a mut T> {
-        if (*len as usize) < size_of::<T>() {
+        if (*len as usize) > isize::MAX as usize || (*len as usize) < size_of::<T>() {
             return Err(AxError::InvalidInput);
         }
         *len = size_of::<T>() as socklen_t;
@@ -138,6 +147,15 @@ pub fn sys_getsockopt(
     }
 
     let socket = Socket::from_fd(fd)?;
+
+    if level == linux_raw_sys::net::SOL_SOCKET && optname == linux_raw_sys::net::SO_OOBINLINE {
+        *get::<i32>(optval, optlen)? = 0;
+        return Ok(0);
+    }
+
+    if level == linux_raw_sys::net::IPPROTO_UDP as u32 {
+        return Err(AxError::OperationNotSupported);
+    }
     macro_rules! dispatch {
         ($which:ident) => {
             socket.get_option(GetSocketOption::$which(get(optval, optlen)?))?;

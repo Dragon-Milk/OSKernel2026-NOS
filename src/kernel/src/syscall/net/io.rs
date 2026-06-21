@@ -4,8 +4,9 @@ use core::net::Ipv4Addr;
 use axerrno::{AxError, AxResult};
 use axio::prelude::*;
 use axnet::{CMsgData, RecvFlags, RecvOptions, SendFlags, SendOptions, SocketAddrEx, SocketOps};
+use linux_raw_sys::general::timespec;
 use linux_raw_sys::net::{
-    MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET, cmsghdr, msghdr, sockaddr, socklen_t,
+    MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET, cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t,
 };
 
 use super::addr::SocketAddrExt;
@@ -78,6 +79,22 @@ pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> AxResult<i
         msg.msg_namelen as socklen_t,
         cmsg,
     )
+}
+
+pub fn sys_sendmmsg(
+    fd: i32,
+    msgvec: UserPtr<mmsghdr>,
+    vlen: u32,
+    flags: u32,
+) -> AxResult<isize> {
+    if vlen == 0 {
+        return Ok(0);
+    }
+
+    let msg = msgvec.get_as_mut()?;
+    let sent = sys_sendmsg(fd, UserConstPtr::from(&msg.msg_hdr as *const msghdr), flags)?;
+    msg.msg_len = sent as _;
+    Ok(1)
 }
 
 fn recv_impl(
@@ -170,4 +187,28 @@ pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> AxResult<isize>
             )
         }),
     )
+}
+
+pub fn sys_recvmmsg(
+    fd: i32,
+    msgvec: UserPtr<mmsghdr>,
+    vlen: u32,
+    _flags: u32,
+    timeout: UserConstPtr<timespec>,
+) -> AxResult<isize> {
+    if vlen == 0 {
+        return Ok(0);
+    }
+
+    let _socket = Socket::from_fd(fd)?;
+    let _msg = msgvec.get_as_mut()?;
+
+    if !timeout.is_null() {
+        let timeout = timeout.get_as_ref()?;
+        if timeout.tv_sec < 0 || timeout.tv_nsec < 0 || timeout.tv_nsec >= 1_000_000_000 {
+            return Err(AxError::InvalidInput);
+        }
+    }
+
+    Err(AxError::WouldBlock)
 }
