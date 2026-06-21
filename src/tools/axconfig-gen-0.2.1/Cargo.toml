@@ -49,8 +49,11 @@ name = "axconfig-gen"
 path = "src/main.rs"
 
 [dependencies.clap]
-version = "4"
+version = "=4.5.40"
 features = ["derive"]
 
 [dependencies.toml_edit]
 version = "0.22"
+
+[patch.crates-io]
+clap_lex = { path = "../../vendor/clap_lex-0.7.5" }

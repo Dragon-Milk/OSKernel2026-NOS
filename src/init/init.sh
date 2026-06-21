@@ -251,6 +251,13 @@ prepare_basic_scripts() {
     done
 }
 
+prepare_cyclictest_env() {
+    bb="$(busybox_cmd)"
+    [ -n "$bb" ] || return
+    echo "[init] prepare cyclictest env: ensuring /tmp /var/tmp exist"
+    "$bb" mkdir -p /tmp /var/tmp 2>/dev/null || true
+}
+
 run_all_non_ltp_testcode_tests() {
     # Scan / /glibc /musl for *_testcode.sh, skip ltp_testcode.sh and test_all.sh.
     for dir in / /glibc /musl; do
@@ -261,6 +268,41 @@ run_all_non_ltp_testcode_tests() {
             name="${testcase##*/}"
             case "$name" in
                 ltp_testcode.sh|ltp_all_testcode.sh)
+                    continue
+                    ;;
+            esac
+
+            run_test_path "$testcase"
+        done
+    done
+}
+
+run_short_before_ltp_tests() {
+    run_test_path /glibc/basic_testcode.sh
+    run_test_path /glibc/busybox_testcode.sh
+    run_test_path /glibc/cyclictest_testcode.sh
+
+    run_test_path /musl/basic_testcode.sh
+    run_test_path /musl/busybox_testcode.sh
+    run_test_path /musl/cyclictest_testcode.sh
+}
+
+run_remaining_non_ltp_after_ltp_tests() {
+    for dir in / /glibc /musl; do
+        [ -d "$dir" ] || continue
+        for testcase in "$dir"/*_testcode.sh; do
+            [ -f "$testcase" ] || continue
+
+            name="${testcase##*/}"
+            case "$name" in
+                ltp_testcode.sh|ltp_all_testcode.sh)
+                    continue
+                    ;;
+            esac
+
+            case "$testcase" in
+                /glibc/basic_testcode.sh|/glibc/busybox_testcode.sh|/glibc/cyclictest_testcode.sh|\
+                /musl/basic_testcode.sh|/musl/busybox_testcode.sh|/musl/cyclictest_testcode.sh)
                     continue
                     ;;
             esac
@@ -743,6 +785,13 @@ case "$TEST_PROFILE" in
         prepare_basic_scripts
         run_all_non_ltp_testcode_tests
         run_ltp_safe_tests
+        ;;
+    full-safe-short-before-ltp)
+        prepare_basic_scripts
+        prepare_cyclictest_env
+        run_short_before_ltp_tests
+        run_ltp_safe_tests
+        run_remaining_non_ltp_after_ltp_tests
         ;;
     *)
         echo "Unknown TEST_PROFILE=$TEST_PROFILE; using stable profile."

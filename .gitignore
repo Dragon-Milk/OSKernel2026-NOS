@@ -21,6 +21,7 @@ logs/
 temp/
 REASONIX.md
 resonix.toml
+src/target.root-bak/
 
 # workflow
 .codex/
