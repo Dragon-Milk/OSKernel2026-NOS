@@ -24,7 +24,7 @@ use linux_raw_sys::general::{
     O_NOATIME, O_WRONLY, RLIMIT_FSIZE, RLIM64_INFINITY,
 };
 
-use super::{FileLike, Kstat, get_file_like, get_inode_flags};
+use super::{FileLike, Kstat, flock, get_file_like, get_inode_flags};
 use crate::{
     file::{FileOwnerEx, IoDst, IoSrc, record_lock},
     mm::busybox_applet,
@@ -541,6 +541,7 @@ impl Drop for File {
         // OFD locks are released here (per-description, last reference).
         if let Some(key) = self.inode_key() {
             record_lock::release_ofd_locks_on_inode(key, self.ofd_id);
+            super::flock::release_flock(key, self.ofd_id);
         }
     }
 }
