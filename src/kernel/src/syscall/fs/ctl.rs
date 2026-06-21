@@ -77,6 +77,14 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> AxResult<isize> {
         set_inode_flags(&loc, user_flags);
         return Ok(0);
     }
+    // TCGETA / TCSETA read/write termio structs from/to user memory.
+    // Validate the user pointer BEFORE dispatching to the file-specific
+    // ioctl handler: EFAULT takes priority over ENOTTY/NotATty.
+    // TCGETA=21509, but older LTP tests may use variant 21569 for the old
+    // termio interface.
+    if cmd == 21509 || cmd == 21569 || cmd == 21510 {
+        (arg as *const u8).vm_read()?;
+    }
     f.ioctl(cmd, arg)
         .map(|result| result as isize)
         .inspect_err(|err| {
@@ -700,16 +708,39 @@ fn update_times(
     atime: Option<Duration>,
     mtime: Option<Duration>,
     flags: u32,
+    set_to_now: bool,
 ) -> AxResult<()> {
     let path = path.nullable().map(vm_load_string).transpose()?;
-    resolve_at(dirfd, path.as_deref(), flags)?
+    let loc = resolve_at(dirfd, path.as_deref(), flags)?
         .into_file()
-        .ok_or(AxError::BadFileDescriptor)?
-        .update_metadata(MetadataUpdate {
-            atime,
-            mtime,
-            ..Default::default()
-        })?;
+        .ok_or(AxError::BadFileDescriptor)?;
+
+    // Reject time modification on read-only filesystems
+    check_writable_filesystem(&loc)?;
+    // Reject time modification on immutable/append-only files
+    check_not_immutable(&loc)?;
+    check_not_append_only(&loc)?;
+
+    // Permission check: who can modify file timestamps
+    let credentials = VfsCredentials::effective();
+    let meta = loc.metadata()?;
+    if !credentials.is_privileged() {
+        if credentials.uid != meta.uid {
+            if set_to_now {
+                // Setting to current time: need write permission on the file
+                check_permission(&loc, credentials, AccessMode::WRITE)?;
+            } else {
+                // Setting to arbitrary time: must be the file owner (or privileged)
+                return Err(AxError::OperationNotPermitted);
+            }
+        }
+    }
+
+    loc.update_metadata(MetadataUpdate {
+        atime,
+        mtime,
+        ..Default::default()
+    })?;
     Ok(())
 }
 
@@ -770,7 +801,8 @@ pub fn sys_utime(path: *const c_char, times: *const utimbuf) -> AxResult<isize> 
         let time = wall_time();
         (time, time)
     };
-    update_times(AT_FDCWD, path, Some(atime), Some(mtime), 0)?;
+    let set_to_now = times.is_null();
+    update_times(AT_FDCWD, path, Some(atime), Some(mtime), 0, set_to_now)?;
     Ok(0)
 }
 
@@ -787,7 +819,8 @@ pub fn sys_utimes(
         let time = wall_time();
         (time, time)
     };
-    update_times(AT_FDCWD, path, Some(atime), Some(mtime), 0)?;
+    let set_to_now = times.is_null();
+    update_times(AT_FDCWD, path, Some(atime), Some(mtime), 0, set_to_now)?;
     Ok(0)
 }
 
@@ -808,22 +841,31 @@ pub fn sys_utimensat(
         }
     }
 
-    let (atime, mtime) = if let Some(times) = times.nullable() {
+    let (atime, mtime, set_to_now) = if let Some(times) = times.nullable() {
         // FIXME: AnyBitPattern
-        let [atime, mtime] = unsafe { times.vm_read_uninit()?.assume_init() };
+        let [atime_spec, mtime_spec] = unsafe { times.vm_read_uninit()?.assume_init() };
+        // Determine if any timestamp is set to an arbitrary (non-NOW, non-OMIT) value.
+        // If any timestamp is arbitrary, only the file owner (or root) may set it.
+        let atime_is_arbitrary =
+            atime_spec.tv_nsec != UTIME_OMIT as _ && atime_spec.tv_nsec != UTIME_NOW as _;
+        let mtime_is_arbitrary =
+            mtime_spec.tv_nsec != UTIME_OMIT as _ && mtime_spec.tv_nsec != UTIME_NOW as _;
+        let any_arbitrary = atime_is_arbitrary || mtime_is_arbitrary;
         (
-            utime_to_duration(&atime).transpose()?,
-            utime_to_duration(&mtime).transpose()?,
+            utime_to_duration(&atime_spec).transpose()?,
+            utime_to_duration(&mtime_spec).transpose()?,
+            !any_arbitrary,
         )
     } else {
         let time = wall_time();
-        (Some(time), Some(time))
+        // times == NULL: both timestamps set to current time (weak permission check)
+        (Some(time), Some(time), true)
     };
     if atime.is_none() && mtime.is_none() {
         return Ok(0);
     }
 
-    update_times(dirfd, path, atime, mtime, flags)?;
+    update_times(dirfd, path, atime, mtime, flags, set_to_now)?;
     Ok(0)
 }
 

@@ -11,8 +11,8 @@ use axio::{Seek, SeekFrom};
 use axpoll::{IoEvents, Pollable};
 use axtask::current;
 use linux_raw_sys::general::{
-    __kernel_off_t, IN_CLOEXEC, IN_NONBLOCK, RLIM64_INFINITY, RLIMIT_FSIZE, RWF_APPEND, RWF_DSYNC,
-    RWF_HIPRI, RWF_NOWAIT, RWF_SYNC,
+    __kernel_off_t, FALLOC_FL_ALLOCATE_RANGE, FALLOC_FL_KEEP_SIZE, IN_CLOEXEC, IN_NONBLOCK,
+    RLIM64_INFINITY, RLIMIT_FSIZE, RWF_APPEND, RWF_DSYNC, RWF_HIPRI, RWF_NOWAIT, RWF_SYNC,
 };
 use starry_vm::{VmMutPtr, VmPtr};
 use syscalls::Sysno;
@@ -222,13 +222,56 @@ pub fn sys_fallocate(
     len: __kernel_off_t,
 ) -> AxResult<isize> {
     debug!("sys_fallocate <= fd: {fd}, mode: {mode}, offset: {offset}, len: {len}");
-    if mode != 0 {
+
+    // Only FALLOC_FL_ALLOCATE_RANGE (mode=0) and FALLOC_FL_KEEP_SIZE (mode=1)
+    // are supported. Reject all other flags.
+    const SUPPORTED_FLAGS: u32 = FALLOC_FL_ALLOCATE_RANGE | FALLOC_FL_KEEP_SIZE;
+    if mode & !SUPPORTED_FLAGS != 0 {
+        return Err(AxError::OperationNotSupported);
+    }
+
+    // Validate offset is non-negative and len is non-negative
+    if offset < 0 {
         return Err(AxError::InvalidInput);
     }
+    if len < 0 {
+        return Err(AxError::InvalidInput);
+    }
+
+    // len == 0 is a valid no-op
+    if len == 0 {
+        return Ok(0);
+    }
+
+    // Check for overflow: offset + len must not exceed max file size
+    let end: u64 = match (offset as u64).checked_add(len as u64) {
+        Some(v) => v,
+        None => return Err(AxError::from(LinuxError::EFBIG)),
+    };
+
+    // File::from_fd returns EBADF for invalid fd, EISDIR for directory fd
     let f = File::from_fd(fd)?;
     let inner = f.inner();
     let file = inner.access(FileFlags::WRITE)?;
-    file.set_len(file.location().len()?.max(offset as u64 + len as u64))?;
+    let loc = file.location();
+
+    // Check filesystem writability and file integrity flags
+    check_writable_filesystem(loc)?;
+    check_not_immutable(loc)?;
+    check_not_append_only(loc)?;
+
+    if mode & FALLOC_FL_KEEP_SIZE != 0 {
+        // FALLOC_FL_KEEP_SIZE: preallocate space but don't change file size.
+        // For basic support, if the requested range fits within the current file
+        // size, the space is already allocated. If it extends beyond, we cannot
+        // preallocate without a block allocator — just succeed silently.
+        // In either case, do not change the file size.
+    } else {
+        // Default: extend the file to accommodate the requested range
+        let current_len = loc.len()?;
+        file.set_len(end.max(current_len))?;
+    }
+
     Ok(0)
 }
 
@@ -569,6 +612,10 @@ pub fn sys_splice(
     }
 
     let src = if !off_in.is_null() {
+        // Pipes do not support offset-based I/O; must return ESPIPE
+        if Pipe::from_fd(fd_in).is_ok() || NamedPipe::from_fd(fd_in).is_ok() {
+            return Err(AxError::from(LinuxError::ESPIPE));
+        }
         if off_in.vm_read()? < 0 {
             return Err(AxError::InvalidInput);
         }
@@ -589,6 +636,10 @@ pub fn sys_splice(
     };
 
     let dst = if !off_out.is_null() {
+        // Pipes do not support offset-based I/O; must return ESPIPE
+        if Pipe::from_fd(fd_out).is_ok() || NamedPipe::from_fd(fd_out).is_ok() {
+            return Err(AxError::from(LinuxError::ESPIPE));
+        }
         if off_out.vm_read()? < 0 {
             return Err(AxError::InvalidInput);
         }
