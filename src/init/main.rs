@@ -4,7 +4,11 @@
 
 extern crate alloc;
 
-const INIT_SCRIPT: &str = concat!(include_str!("ltp-cases.sh"), "\n", include_str!("init.sh"));
+const INIT_SCRIPT: &str = concat!(
+    "LTP_SAFE_DATA='", include_str!("ltp-cases/ltp-safe.txt"), "'\n",
+    include_str!("ltp-cases.sh"), "\n",
+    include_str!("init.sh")
+);
 
 pub const CMDLINES: &[&[&str]] = &[
     &["/bin/sh", "-c", INIT_SCRIPT],

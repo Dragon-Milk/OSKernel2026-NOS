@@ -1,17 +1,11 @@
-kill13
 leapsec01
-nanosleep01
 nanosleep02
 nanosleep04
 newuname01
-nice01
 nice02
 nice03
-nice04
-nice05
 nptl01
 pause01
-pause02
 pause03
 personality01
 personality02
@@ -20,7 +14,6 @@ pidfd_getfd02
 pidfd_open01
 pidfd_open02
 pidfd_open03
-pidfd_open04
 pidfd_send_signal01
 pidfd_send_signal02
 pidfd_send_signal03

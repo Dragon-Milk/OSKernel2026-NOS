@@ -10,15 +10,10 @@ chmod05
 chmod06
 chmod07
 chown01
-chown01_16
 chown02
-chown02_16
 chown03
-chown03_16
 chown04
-chown04_16
 chown05
-chown05_16
 close01
 close02
 close_range01

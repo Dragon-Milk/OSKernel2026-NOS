@@ -88,6 +88,16 @@ pub trait DirNodeOps: NodeOps {
     /// - If `src` is not a directory, `dst` must not exist or not be a
     ///   directory.
     fn rename(&self, src_name: &str, dst_dir: &DirNode, dst_name: &str) -> VfsResult<()>;
+
+    /// Atomically exchanges two directory entries.
+    ///
+    /// Both `src_name` (in `self`) and `dst_name` (in `dst_dir`) must exist.
+    ///
+    /// The default implementation returns `InvalidInput` — filesystems that
+    /// support exchange must override it.
+    fn exchange(&self, _src_name: &str, _dst_dir: &DirNode, _dst_name: &str) -> VfsResult<()> {
+        Err(VfsError::InvalidInput)
+    }
 }
 
 /// Options for opening (or creating) a directory entry.
@@ -306,9 +316,8 @@ impl DirNode {
                 .map_or_else(|| src_children.deref_mut(), DerefMut::deref_mut),
         ) {
             if src.node_type() == NodeType::Directory {
-                if let Ok(dir) = dst.as_dir()
-                    && dir.has_children()?
-                {
+                let dir = dst.as_dir()?;
+                if dir.has_children()? {
                     return Err(VfsError::DirectoryNotEmpty);
                 }
             } else if dst.node_type() == NodeType::Directory {
@@ -319,6 +328,37 @@ impl DirNode {
         drop(dst_children);
 
         self.ops.rename(src_name, dst_dir, dst_name).inspect(|_| {
+            let (mut src_children, mut dst_children) = self.lock_both_cache(dst_dir);
+            Self::forget_entry(&mut src_children, src_name);
+            Self::forget_entry(
+                dst_children
+                    .as_mut()
+                    .map_or_else(|| src_children.deref_mut(), DerefMut::deref_mut),
+                dst_name,
+            );
+        })
+    }
+
+    /// Atomically exchanges two directory entries.
+    ///
+    /// Both `src_name` (in `self`) and `dst_name` (in `dst_dir`) must exist.
+    pub fn exchange(&self, src_name: &str, dst_dir: &Self, dst_name: &str) -> VfsResult<()> {
+        verify_entry_name(src_name)?;
+        verify_entry_name(dst_name)?;
+
+        // Verify both entries exist before delegating to the backend.
+        let (mut src_children, mut dst_children) = self.lock_both_cache(dst_dir);
+        let _src = self.lookup_locked(src_name, &mut src_children)?;
+        let _dst = dst_dir.lookup_locked(
+            dst_name,
+            dst_children
+                .as_mut()
+                .map_or_else(|| src_children.deref_mut(), DerefMut::deref_mut),
+        )?;
+        drop(src_children);
+        drop(dst_children);
+
+        self.ops.exchange(src_name, dst_dir, dst_name).inspect(|_| {
             let (mut src_children, mut dst_children) = self.lock_both_cache(dst_dir);
             Self::forget_entry(&mut src_children, src_name);
             Self::forget_entry(

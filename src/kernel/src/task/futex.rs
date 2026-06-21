@@ -8,7 +8,7 @@ use alloc::{
 use core::{
     future::poll_fn,
     ops::Deref,
-    sync::atomic::AtomicBool,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::{Poll, Waker},
     time::Duration,
 };
@@ -31,7 +31,8 @@ use crate::{
 /// Wait queue used by futex.
 #[derive(Default)]
 pub struct WaitQueue {
-    queue: SpinNoIrq<VecDeque<(Waker, u32)>>,
+    queue: SpinNoIrq<VecDeque<(usize, Waker, u32)>>,
+    next_id: AtomicUsize,
 }
 impl WaitQueue {
     /// Creates a new `WaitQueue`.
@@ -50,7 +51,9 @@ impl WaitQueue {
         condition: impl FnOnce() -> bool,
     ) -> AxResult<bool> {
         let mut condition = Some(condition);
-        block_on(interruptible(future::timeout(
+        let waiter_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut queued = false;
+        let result = block_on(interruptible(future::timeout(
             timeout,
             poll_fn(|cx| {
                 if let Some(cond) = condition.take() {
@@ -58,21 +61,26 @@ impl WaitQueue {
                     if !cond() {
                         Poll::Ready(Ok(false))
                     } else {
-                        queue.push_back((cx.waker().clone(), bitset));
+                        queue.push_back((waiter_id, cx.waker().clone(), bitset));
+                        queued = true;
                         Poll::Pending
                     }
                 } else {
                     Poll::Ready(Ok(true))
                 }
             }),
-        )))??
+        )));
+        if queued {
+            self.queue.lock().retain(|(id, _, _)| *id != waiter_id);
+        }
+        result??
     }
 
     /// Wakes up at most `count` tasks whose bitset intersects with the given
     /// bitmask.
     pub fn wake(&self, count: usize, mask: u32) -> usize {
         let mut woke = 0;
-        self.queue.lock().retain(|(waker, bitset)| {
+        self.queue.lock().retain(|(_, waker, bitset)| {
             if woke >= count || (bitset & mask) == 0 {
                 true
             } else {

@@ -36,7 +36,6 @@ impl TryFrom<Clone3Args> for CloneArgs {
         if args.cgroup != 0 {
             warn!("sys_clone3: cgroup parameter not supported, ignoring");
         }
-
         let flags = CloneFlags::from_bits_truncate(args.flags);
 
         if args.exit_signal > 0 && flags.intersects(CloneFlags::THREAD | CloneFlags::PARENT) {
@@ -60,6 +59,8 @@ impl TryFrom<Clone3Args> for CloneArgs {
             flags,
             exit_signal: args.exit_signal,
             stack,
+            stack_size: args.stack_size as usize,
+            from_clone3: true,
             tls: args.tls as usize,
             parent_tid: args.parent_tid as usize,
             child_tid: args.child_tid as usize,
@@ -76,6 +77,8 @@ pub fn sys_clone3(uctx: &UserContext, args: *const u8, size: usize) -> AxResult<
         return Err(AxError::InvalidInput);
     }
 
+    let read_size = size.min(core::mem::size_of::<Clone3Args>());
+
     if size > core::mem::size_of::<Clone3Args>() {
         debug!("sys_clone3: size {size} larger than expected, using known fields only");
     }
@@ -84,8 +87,24 @@ pub fn sys_clone3(uctx: &UserContext, args: *const u8, size: usize) -> AxResult<
     // SAFETY: MaybeUninit<T> is compatible with T, and we're filling in the
     // buffer with bytes read from the user
     vm_read_slice(args, unsafe {
-        mem::transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut buffer[..size])
+        mem::transmute::<&mut [u8], &mut [MaybeUninit<u8>]>(&mut buffer[..read_size])
     })?;
+
+    if size > core::mem::size_of::<Clone3Args>() {
+        let mut tail = [MaybeUninit::<u8>::uninit(); 32];
+        let mut offset = core::mem::size_of::<Clone3Args>();
+        while offset < size {
+            let chunk_len = (size - offset).min(tail.len());
+            vm_read_slice(unsafe { args.add(offset) }, &mut tail[..chunk_len])?;
+            for byte in &tail[..chunk_len] {
+                if unsafe { byte.assume_init() } != 0 {
+                    return Err(AxError::InvalidInput);
+                }
+            }
+            offset += chunk_len;
+        }
+    }
+
     let clone3_args: Clone3Args =
         bytemuck::try_pod_read_unaligned(&buffer).map_err(|_| AxError::InvalidInput)?;
 

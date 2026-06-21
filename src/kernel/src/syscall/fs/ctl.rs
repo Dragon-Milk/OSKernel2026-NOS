@@ -1,23 +1,33 @@
-use alloc::{ffi::CString, vec, vec::Vec};
+use alloc::{ffi::CString, string::String, vec, vec::Vec};
 use core::{
     ffi::{c_char, c_int},
     mem::offset_of,
     time::Duration,
 };
 
-use axerrno::{AxError, AxResult};
-use axfs::{FsContext, FS_CONTEXT};
-use axfs_ng_vfs::{path::Path, MetadataUpdate, NodePermission, NodeType};
+use axerrno::{AxError, AxResult, LinuxError};
+use axfs::{FS_CONTEXT, FsContext};
+use axfs_ng_vfs::{DeviceId, Location, MetadataUpdate, NodePermission, NodeType, path::Path};
 use axhal::time::wall_time;
 use axtask::current;
 use linux_raw_sys::{
     general::*,
     ioctl::{FIONBIO, TIOCGWINSZ},
 };
-use starry_vm::{vm_write_slice, VmPtr};
+use starry_vm::{VmMutPtr, VmPtr, vm_read_slice, vm_write_slice};
 
 use crate::{
-    file::{get_file_like, resolve_at, with_fs, Directory, File, FileLike},
+    file::{
+        AccessMode, Directory, File, FileLike, NamedPipe, VfsCredentials,
+        check_not_append_only, check_not_immutable,
+        check_parent_permission, check_path_len, check_path_search,
+        check_permission, check_writable_filesystem, clear_setgid_if_not_in_group,
+        creation_metadata, do_getxattr, do_listxattr, do_removexattr, do_setxattr,
+        get_file_like, get_inode_flags, is_directory_deleted, mark_directory_deleted, remove_inode_flags,
+        remove_xattr_map, resolve_at, set_inode_flags,
+        with_fs, with_fs_at,
+        FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, Socket,
+    },
     mm::vm_load_string,
     task::AsThread,
     time::TimeValueLike,
@@ -34,6 +44,37 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> AxResult<isize> {
             return Err(AxError::InvalidInput);
         }
         f.set_nonblocking(val != 0)?;
+        return Ok(0);
+    }
+    if cmd == FS_IOC_GETFLAGS {
+        // Only regular files, directories, symlinks, and FIFOs support inode flags.
+        let loc = if let Some(file) = f.downcast_ref::<File>() {
+            file.inner().location().clone()
+        } else if let Some(dir) = f.downcast_ref::<Directory>() {
+            dir.inner().clone()
+        } else {
+            return Err(AxError::NotATty);
+        };
+        let flags = get_inode_flags(&loc);
+        (arg as *mut u32).vm_write(flags)?;
+        return Ok(0);
+    }
+    if cmd == FS_IOC_SETFLAGS {
+        let loc = if let Some(file) = f.downcast_ref::<File>() {
+            file.inner().location().clone()
+        } else if let Some(dir) = f.downcast_ref::<Directory>() {
+            dir.inner().clone()
+        } else {
+            return Err(AxError::NotATty);
+        };
+        check_writable_filesystem(&loc)?;
+        let credentials = VfsCredentials::effective();
+        // Only effective-root can set immutable/append flags.
+        if !credentials.is_privileged() {
+            return Err(AxError::OperationNotPermitted);
+        }
+        let user_flags = (arg as *const u32).vm_read()?;
+        set_inode_flags(&loc, user_flags);
         return Ok(0);
     }
     f.ioctl(cmd, arg)
@@ -55,7 +96,11 @@ pub fn sys_chdir(path: *const c_char) -> AxResult<isize> {
     debug!("sys_chdir <= path: {path}");
 
     let mut fs = FS_CONTEXT.lock();
+    let credentials = VfsCredentials::effective();
+    check_path_search(&fs, &path, credentials)?;
     let entry = fs.resolve(path)?;
+    entry.check_is_dir()?;
+    check_permission(&entry, credentials, AccessMode::EXEC)?;
     fs.set_current_dir(entry)?;
     Ok(0)
 }
@@ -64,6 +109,8 @@ pub fn sys_fchdir(dirfd: i32) -> AxResult<isize> {
     debug!("sys_fchdir <= dirfd: {dirfd}");
 
     let entry = with_fs(dirfd, |fs| Ok(fs.current_dir().clone()))?;
+    entry.check_is_dir()?;
+    check_permission(&entry, VfsCredentials::effective(), AccessMode::EXEC)?;
     FS_CONTEXT.lock().set_current_dir(entry)?;
     Ok(0)
 }
@@ -93,11 +140,80 @@ pub fn sys_mkdirat(dirfd: i32, path: *const c_char, mode: u32) -> AxResult<isize
     let mode = mode & !current().as_thread().proc_data.umask();
     let mode = NodePermission::from_bits_truncate(mode as u16);
 
-    with_fs(dirfd, |fs| {
+    let credentials = VfsCredentials::effective();
+    with_fs_at(dirfd, &path, |fs| {
         if fs.resolve(&path).is_ok() {
             return Err(AxError::AlreadyExists);
         }
-        fs.create_dir(path, mode)?;
+        check_parent_permission(fs, &path, credentials, AccessMode::WRITE | AccessMode::EXEC)?;
+        let (parent, name) = fs.resolve_nonexistent(Path::new(&path))?;
+        check_writable_filesystem(&parent)?;
+        let (owner, mode) = creation_metadata(&parent, NodeType::Directory, mode, credentials)?;
+        let loc = parent.create(name, NodeType::Directory, mode)?;
+        loc.update_metadata(MetadataUpdate {
+            owner: Some(owner),
+            mode: Some(mode),
+            ..Default::default()
+        })?;
+        Ok(0)
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn sys_mknod(path: *const c_char, mode: u32, dev: u32) -> AxResult<isize> {
+    sys_mknodat(AT_FDCWD, path, mode, dev)
+}
+
+pub fn sys_mknodat(dirfd: i32, path: *const c_char, mode: u32, dev: u32) -> AxResult<isize> {
+    let path = vm_load_string(path)?;
+    debug!("sys_mknodat <= dirfd: {dirfd}, path: {path}, mode: {mode:#o}, dev: {dev}");
+
+    if path.is_empty() {
+        return Err(AxError::NotFound);
+    }
+
+    let node_type = match mode & S_IFMT {
+        0 | S_IFREG => NodeType::RegularFile,
+        S_IFIFO => NodeType::Fifo,
+        S_IFDIR => return Err(AxError::OperationNotPermitted),
+        S_IFCHR => NodeType::CharacterDevice,
+        S_IFBLK => NodeType::BlockDevice,
+        S_IFSOCK => NodeType::Socket,
+        _ => return Err(AxError::InvalidInput),
+    };
+
+    let rdev = match node_type {
+        NodeType::CharacterDevice | NodeType::BlockDevice => {
+            // Linux 16-bit dev_t encoding: major 12 bits, minor 20 bits.
+            let major = (dev >> 8) & 0xfff;
+            let minor = (dev & 0xff) | ((dev >> 12) & 0xfff00);
+            DeviceId::new(major, minor)
+        }
+        _ => DeviceId::default(),
+    };
+
+    let mode = mode & !current().as_thread().proc_data.umask();
+    let mode = NodePermission::from_bits_truncate(mode as u16);
+    let credentials = VfsCredentials::effective();
+
+    with_fs(dirfd, |fs| {
+        match fs.resolve_no_follow(&path) {
+            Ok(_) => return Err(AxError::AlreadyExists),
+            Err(AxError::NotFound) => {}
+            Err(err) => return Err(err),
+        }
+        check_parent_permission(fs, &path, credentials, AccessMode::WRITE | AccessMode::EXEC)?;
+        let (parent, name) = fs.resolve_nonexistent(Path::new(&path))?;
+        let (owner, mode) = creation_metadata(&parent, node_type, mode, credentials)?;
+        let loc = parent.create(name, node_type, mode)?;
+        loc.update_metadata(MetadataUpdate {
+            owner: Some(owner),
+            ..Default::default()
+        })?;
+        // Store rdev for device nodes via user_data.
+        if node_type == NodeType::CharacterDevice || node_type == NodeType::BlockDevice {
+            loc.user_data().insert(rdev);
+        }
         Ok(0)
     })
 }
@@ -154,10 +270,12 @@ impl DirBuffer {
 pub fn sys_getdents64(fd: i32, buf: *mut u8, len: usize) -> AxResult<isize> {
     debug!("sys_getdents64 <= fd: {fd}, buf: {buf:?}, len: {len}");
 
-    let mut buffer = DirBuffer::new(len);
-
     let dir = Directory::from_fd(fd)?;
+    if dir.is_deleted() {
+        return Err(AxError::NotFound);
+    }
     let mut dir_offset = dir.offset.lock();
+    let mut buffer = DirBuffer::new(len);
 
     let mut has_remaining = false;
 
@@ -192,6 +310,12 @@ pub fn sys_linkat(
     new_path: *const c_char,
     flags: u32,
 ) -> AxResult<isize> {
+    const VALID_FLAGS: u32 = AT_EMPTY_PATH | AT_SYMLINK_FOLLOW;
+
+    if flags & !VALID_FLAGS != 0 {
+        return Err(AxError::InvalidInput);
+    }
+
     let old_path = old_path.nullable().map(vm_load_string).transpose()?;
     let new_path = vm_load_string(new_path)?;
     debug!(
@@ -199,19 +323,39 @@ pub fn sys_linkat(
          new_path: {new_path}, flags: {flags}"
     );
 
-    if flags != 0 {
-        warn!("Unsupported flags: {flags}");
+    if new_path.is_empty() {
+        return Err(AxError::NotFound);
     }
+    check_path_len(&new_path)?;
 
+    let credentials = VfsCredentials::effective();
+    if let Some(path) = old_path.as_deref()
+        && !path.is_empty()
+    {
+        check_path_len(path)?;
+        with_fs_at(old_dirfd, path, |fs| check_path_search(fs, path, credentials))?;
+    }
     let old = resolve_at(old_dirfd, old_path.as_deref(), flags)?
         .into_file()
         .ok_or(AxError::BadFileDescriptor)?;
     if old.is_dir() {
         return Err(AxError::OperationNotPermitted);
     }
+    with_fs_at(new_dirfd, &new_path, |fs| {
+        check_parent_permission(
+            fs,
+            &new_path,
+            credentials,
+            AccessMode::WRITE | AccessMode::EXEC,
+        )
+    })?;
     let (new_dir, new_name) =
-        with_fs(new_dirfd, |fs| fs.resolve_nonexistent(Path::new(&new_path)))?;
+        with_fs_at(new_dirfd, &new_path, |fs| fs.resolve_nonexistent(Path::new(&new_path)))?;
 
+    if !new_dir.same_mountpoint(&old) {
+        return Err(AxError::CrossesDevices);
+    }
+    check_writable_filesystem(&new_dir)?;
     new_dir.link(new_name, &old)?;
     Ok(0)
 }
@@ -227,15 +371,79 @@ pub fn sys_link(old_path: *const c_char, new_path: *const c_char) -> AxResult<is
 /// flags: can be 0 or AT_REMOVEDIR
 /// return 0 when success, else return -1
 pub fn sys_unlinkat(dirfd: i32, path: *const c_char, flags: usize) -> AxResult<isize> {
+    if flags & !(AT_REMOVEDIR as usize) != 0 {
+        return Err(AxError::InvalidInput);
+    }
+
     let path = vm_load_string(path)?;
 
     debug!("sys_unlinkat <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
-    with_fs(dirfd, |fs| {
+    if path.is_empty() {
+        return Err(AxError::NotFound);
+    }
+    check_path_len(&path)?;
+
+    let credentials = VfsCredentials::effective();
+    with_fs_at(dirfd, &path, |fs| {
         if flags == AT_REMOVEDIR as _ {
-            fs.remove_dir(path)?;
+            let entry = fs.resolve_no_follow(path.as_str())?;
+            let parent = entry.parent().ok_or(AxError::ResourceBusy)?;
+            if parent.lookup_no_mount(entry.name())?.is_mountpoint() {
+                return Err(AxError::ResourceBusy);
+            }
+            check_parent_permission(
+                fs,
+                &path,
+                credentials,
+                AccessMode::WRITE | AccessMode::EXEC,
+            )?;
+            check_writable_filesystem(&parent)?;
+            check_not_immutable(&entry)?;
+            check_not_append_only(&entry)?;
+            check_sticky_removal(&parent, &entry, credentials)?;
+            match fs.remove_dir(path.as_str()) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            mark_directory_deleted(&entry);
+            // Directories cannot be hard-linked; always clean up inode-level
+            // tracking (xattr, inode flags) so that reused inode numbers do
+            // not inherit stale data.
+            remove_xattr_map(&entry);
+            remove_inode_flags(&entry);
         } else {
-            fs.remove_file(path)?;
+            // Resolve parent first so we can check read-only filesystem
+            // before attempting to find the entry itself.
+            // This is needed for LTP unlink09: rofs → EROFS even if the
+            // target file is not visible through the mountpoint.
+            check_path_search(fs, &path, credentials)?;
+            let (parent, _) = fs.resolve_nonexistent(Path::new(&path))?;
+            check_permission(&parent, credentials, AccessMode::WRITE | AccessMode::EXEC)?;
+            check_writable_filesystem(&parent)?;
+
+            let entry = fs.resolve_no_follow(path.as_str())?;
+            if let Some(_parent) = entry.parent() {
+                // parent obtained from resolve_nonexistent already covers the
+                // filesystem check; use entry.parent() for sticky removal.
+                check_not_immutable(&entry)?;
+                check_not_append_only(&entry)?;
+                check_sticky_removal(&_parent, &entry, credentials)?;
+            } else {
+                check_not_immutable(&entry)?;
+                check_not_append_only(&entry)?;
+            }
+            // Capture whether this is the last link *before* the backend
+            // decrements nlink, so we know when to discard xattr / inode-flags.
+            let last_link = entry.metadata().map(|m| m.nlink).unwrap_or(0) <= 1;
+            match fs.remove_file(path.as_str()) {
+                Ok(()) => {}
+                Err(e) => return Err(e),
+            }
+            if last_link {
+                remove_xattr_map(&entry);
+                remove_inode_flags(&entry);
+            }
         }
         Ok(0)
     })
@@ -251,25 +459,34 @@ pub fn sys_unlink(path: *const c_char) -> AxResult<isize> {
     sys_unlinkat(AT_FDCWD, path, 0)
 }
 
-pub fn sys_getcwd(buf: *mut u8, size: isize) -> AxResult<isize> {
-    let size: usize = size.try_into().map_err(|_| AxError::BadAddress)?;
-    if buf.is_null() {
-        return Ok(0);
-    }
+pub fn sys_getcwd(buf: *mut u8, size: usize) -> AxResult<isize> {
+    // Phase 1: obtain the constructed absolute path and the cwd identity
+    // under the FS lock, then release it before the (possibly slow) resolve.
+    let (cwd_path, cwd_device, cwd_inode, cwd_node_type, cwd_deleted) = {
+        let fs = FS_CONTEXT.lock();
+        let cur = fs.current_dir();
+        let path = cur.absolute_path()?;
+        let meta = cur.metadata().map_err(|_| AxError::NotFound)?;
+        let deleted = is_directory_deleted(cur);
+        (path, meta.device, meta.inode, cur.node_type(), deleted)
+    };
 
-    let cwd = FS_CONTEXT.lock().current_dir().absolute_path()?;
-    debug!("sys_getcwd => cwd: {cwd}");
-
-    let cwd = CString::new(cwd.as_str()).map_err(|_| AxError::InvalidInput)?;
+    let cwd = CString::new(cwd_path.as_str()).map_err(|_| AxError::InvalidInput)?;
     let cwd = cwd.as_bytes_with_nul();
+    // copied_len includes the NUL terminator (Linux ABI).
+    let copied_len = cwd.len();
 
-    if cwd.len() <= size {
-        vm_write_slice(buf, cwd)?;
-        // FIXME: it is said that this should return 0
-        Ok(buf.as_ptr() as _)
-    } else {
-        Err(AxError::OutOfRange)
+    if size < copied_len {
+        return Err(AxError::OutOfRange);
     }
+
+    vm_write_slice(buf, cwd)?;
+
+    // Linux getcwd(2) returns the number of bytes copied to the user
+    // buffer, including the NUL terminator. glibc's getcwd() checks that
+    // retval > 0 && path[0] == '/' before returning buf to the caller;
+    // otherwise it falls back to a manual /proc/self/cwd traversal.
+    Ok(copied_len as isize)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -286,7 +503,18 @@ pub fn sys_symlinkat(
     let linkpath = vm_load_string(linkpath)?;
     debug!("sys_symlinkat <= target: {target:?}, new_dirfd: {new_dirfd}, linkpath: {linkpath:?}");
 
-    with_fs(new_dirfd, |fs| {
+    if linkpath.is_empty() {
+        return Err(AxError::NotFound);
+    }
+
+    let credentials = VfsCredentials::effective();
+    with_fs_at(new_dirfd, &linkpath.clone(), |fs| {
+        check_parent_permission(
+            fs,
+            &linkpath,
+            credentials,
+            AccessMode::WRITE | AccessMode::EXEC,
+        )?;
         fs.symlink(target, linkpath)?;
         Ok(0)
     })
@@ -307,13 +535,33 @@ pub fn sys_readlinkat(
 
     debug!("sys_readlinkat <= dirfd: {dirfd}, path: {path:?}");
 
-    with_fs(dirfd, |fs| {
-        let entry = fs.resolve_no_follow(path)?;
-        let link = entry.read_link()?;
-        let read = size.min(link.len());
-        vm_write_slice(buf, &link.as_bytes()[..read])?;
-        Ok(read as isize)
-    })
+    if size == 0 {
+        return Err(AxError::InvalidInput);
+    }
+
+    let link = if path.is_empty() {
+        if dirfd == AT_FDCWD {
+            return Err(AxError::NotFound);
+        }
+        let file_like = get_file_like(dirfd)?;
+        if let Some(file) = file_like.downcast_ref::<File>() {
+            file.inner().location().read_link()?
+        } else if let Some(dir) = file_like.downcast_ref::<Directory>() {
+            dir.inner().read_link()?
+        } else {
+            return Err(AxError::BadFileDescriptor);
+        }
+    } else {
+        check_path_len(&path)?;
+        let credentials = VfsCredentials::effective();
+        with_fs_at(dirfd, &path, |fs| {
+            check_path_search(fs, path.as_str(), credentials)?;
+            fs.resolve_no_follow(path.as_str())?.read_link()
+        })?
+    };
+    let read = size.min(link.len());
+    vm_write_slice(buf, &link.as_bytes()[..read])?;
+    Ok(read as isize)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -328,6 +576,7 @@ pub fn sys_lchown(path: *const c_char, uid: i32, gid: i32) -> AxResult<isize> {
 }
 
 pub fn sys_fchown(fd: i32, uid: i32, gid: i32) -> AxResult<isize> {
+    check_not_o_path_fd(fd)?;
     sys_fchownat(fd, core::ptr::null(), uid, gid, AT_EMPTY_PATH)
 }
 
@@ -338,22 +587,52 @@ pub fn sys_fchownat(
     gid: i32,
     flags: u32,
 ) -> AxResult<isize> {
+    const VALID_FLAGS: u32 = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW;
+
+    if flags & !VALID_FLAGS != 0 {
+        return Err(AxError::InvalidInput);
+    }
+
     let path = path.nullable().map(vm_load_string).transpose()?;
+    let credentials = VfsCredentials::effective();
+    if let Some(path) = path.as_deref() {
+        if !path.is_empty() {
+            if path_refers_to_o_path_fd(path) {
+                return Err(AxError::BadFileDescriptor);
+            }
+            check_path_len(path)?;
+            with_fs_at(dirfd, path, |fs| check_path_search(fs, path, credentials))?;
+        }
+    }
+    if flags & AT_EMPTY_PATH != 0 && path.as_deref().map_or(true, |p| p.is_empty()) {
+        check_not_o_path_fd(dirfd)?;
+    }
     let loc = resolve_at(dirfd, path.as_deref(), flags)?
         .into_file()
         .ok_or(AxError::BadFileDescriptor)?;
+    check_writable_filesystem(&loc)?;
+    check_not_immutable(&loc)?;
+    check_not_append_only(&loc)?;
     let meta = loc.metadata()?;
+    let uid = if uid == -1 { meta.uid } else { uid as _ };
+    let gid = if gid == -1 { meta.gid } else { gid as _ };
+    if credentials.uid != 0 {
+        if credentials.uid != meta.uid
+            || uid != meta.uid
+            || (gid != meta.gid && gid != credentials.gid)
+        {
+            return Err(AxError::OperationNotPermitted);
+        }
+    }
 
     let mut mode = meta.mode;
     // chown always clears the setuid bits
     mode.remove(NodePermission::SET_UID);
-    // chown also removes the setgid bits if group-executable
-    if mode.contains(NodePermission::GROUP_EXEC) {
+    // chown also removes the setgid bit from group-executable non-directories.
+    if meta.node_type != NodeType::Directory && mode.contains(NodePermission::GROUP_EXEC) {
         mode.remove(NodePermission::SET_GID);
     }
 
-    let uid = if uid == -1 { meta.uid } else { uid as _ };
-    let gid = if gid == -1 { meta.gid } else { gid as _ };
     loc.update_metadata(MetadataUpdate {
         owner: Some((uid, gid)),
         mode: Some(mode),
@@ -368,18 +647,50 @@ pub fn sys_chmod(path: *const c_char, mode: u32) -> AxResult<isize> {
 }
 
 pub fn sys_fchmod(fd: i32, mode: u32) -> AxResult<isize> {
+    check_not_o_path_fd(fd)?;
     sys_fchmodat(fd, core::ptr::null(), mode, AT_EMPTY_PATH)
 }
 
 pub fn sys_fchmodat(dirfd: i32, path: *const c_char, mode: u32, flags: u32) -> AxResult<isize> {
+    const VALID_FLAGS: u32 = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW;
+
+    if flags & !VALID_FLAGS != 0 {
+        return Err(AxError::InvalidInput);
+    }
+
     let path = path.nullable().map(vm_load_string).transpose()?;
-    resolve_at(dirfd, path.as_deref(), flags)?
+    let credentials = VfsCredentials::effective();
+    if let Some(path) = path.as_deref() {
+        if !path.is_empty() {
+            if path_refers_to_o_path_fd(path) {
+                return Err(AxError::BadFileDescriptor);
+            }
+            check_path_len(path)?;
+            with_fs_at(dirfd, path, |fs| check_path_search(fs, path, credentials))?;
+        }
+    }
+    if flags & AT_EMPTY_PATH != 0 && path.as_deref().map_or(true, |p| p.is_empty()) {
+        check_not_o_path_fd(dirfd)?;
+    }
+    let loc = resolve_at(dirfd, path.as_deref(), flags)?
         .into_file()
-        .ok_or(AxError::BadFileDescriptor)?
-        .update_metadata(MetadataUpdate {
-            mode: Some(NodePermission::from_bits_truncate(mode as u16)),
-            ..Default::default()
-        })?;
+        .ok_or(AxError::BadFileDescriptor)?;
+    check_writable_filesystem(&loc)?;
+    check_not_immutable(&loc)?;
+    check_not_append_only(&loc)?;
+    let meta = loc.metadata()?;
+    if credentials.uid != 0 && credentials.uid != meta.uid {
+        return Err(AxError::OperationNotPermitted);
+    }
+    let mode = clear_setgid_if_not_in_group(
+        NodePermission::from_bits_truncate(mode as u16),
+        meta.gid,
+        credentials,
+    );
+    loc.update_metadata(MetadataUpdate {
+        mode: Some(mode),
+        ..Default::default()
+    })?;
     Ok(0)
 }
 
@@ -400,6 +711,42 @@ fn update_times(
             ..Default::default()
         })?;
     Ok(())
+}
+
+fn check_rename_type(old: &Location, new: Option<&Location>) -> AxResult<()> {
+    let Some(new) = new else {
+        return Ok(());
+    };
+
+    match (
+        old.node_type() == NodeType::Directory,
+        new.node_type() == NodeType::Directory,
+    ) {
+        (true, false) => Err(AxError::NotADirectory),
+        (false, true) => Err(AxError::IsADirectory),
+        _ => Ok(()),
+    }
+}
+
+fn check_sticky_removal(
+    parent: &Location,
+    entry: &Location,
+    credentials: VfsCredentials,
+) -> AxResult<()> {
+    let parent_meta = parent.metadata()?;
+    if !parent_meta.mode.contains(NodePermission::STICKY) {
+        return Ok(());
+    }
+
+    let entry_meta = entry.metadata()?;
+    if credentials.is_privileged()
+        || credentials.uid == parent_meta.uid
+        || credentials.uid == entry_meta.uid
+    {
+        Ok(())
+    } else {
+        Err(AxError::OperationNotPermitted)
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -509,11 +856,87 @@ pub fn sys_renameat2(
          new_path: {new_path}, flags: {flags}"
     );
 
-    let (old_dir, old_name) = with_fs(old_dirfd, |fs| fs.resolve_parent(Path::new(&old_path)))?;
-    let (new_dir, new_name) =
-        with_fs(new_dirfd, |fs| fs.resolve_nonexistent(Path::new(&new_path)))?;
+    check_path_len(&old_path)?;
+    check_path_len(&new_path)?;
 
-    old_dir.rename(&old_name, &new_dir, new_name)?;
+    // Validate flags.
+    // RENAME_WHITEOUT is unsupported.
+    // RENAME_NOREPLACE and RENAME_EXCHANGE are mutually exclusive.
+    const SUPPORTED_FLAGS: u32 = RENAME_NOREPLACE | RENAME_EXCHANGE;
+    if flags & RENAME_WHITEOUT != 0 {
+        return Err(AxError::InvalidInput);
+    }
+    if flags & !(SUPPORTED_FLAGS | RENAME_WHITEOUT) != 0 {
+        return Err(AxError::InvalidInput);
+    }
+    if flags & SUPPORTED_FLAGS == SUPPORTED_FLAGS {
+        // NOREPLACE | EXCHANGE together is EINVAL (LTP case 4)
+        return Err(AxError::InvalidInput);
+    }
+
+    let is_exchange = flags & RENAME_EXCHANGE != 0;
+
+    let (old_dir, old_name, old) = with_fs_at(old_dirfd, &old_path, |fs| {
+        let (old_dir, old_name) = fs.resolve_parent(Path::new(&old_path))?;
+        let old = old_dir.lookup_no_follow(&old_name)?;
+        Ok((old_dir, old_name.into_owned(), old))
+    })?;
+    let (new_dir, new_name, new) = with_fs_at(new_dirfd, &new_path, |fs| {
+        let (new_dir, new_name) = fs.resolve_nonexistent(Path::new(&new_path))?;
+        let new = match new_dir.lookup_no_follow(new_name) {
+            Ok(loc) => Some(loc),
+            Err(AxError::NotFound) => None,
+            Err(err) => return Err(err),
+        };
+        Ok((new_dir, String::from(new_name), new))
+    })?;
+
+    if !old_dir.same_mountpoint(&new_dir) {
+        return Err(AxError::CrossesDevices);
+    }
+
+    // RENAME_EXCHANGE requires both paths to exist.
+    if is_exchange && new.is_none() {
+        return Err(AxError::NotFound);
+    }
+
+    // Handle same-inode no-op and RENAME_NOREPLACE target-exists check
+    if let Some(new) = new.as_ref() {
+        if old.same_mountpoint(new) && old.inode() == new.inode() {
+            return Ok(0);
+        }
+        if !is_exchange && flags & RENAME_NOREPLACE != 0 {
+            return Err(AxError::AlreadyExists);
+        }
+    }
+
+    // Type checks: for exchange Linux allows different types, so skip.
+    if !is_exchange {
+        check_rename_type(&old, new.as_ref())?;
+    }
+
+    check_writable_filesystem(&old_dir)?;
+    check_writable_filesystem(&new_dir)?;
+
+    let credentials = VfsCredentials::effective();
+    check_permission(&old_dir, credentials, AccessMode::WRITE | AccessMode::EXEC)?;
+    check_permission(&new_dir, credentials, AccessMode::WRITE | AccessMode::EXEC)?;
+    check_not_immutable(&old)?;
+    check_not_append_only(&old)?;
+    if let Some(new) = new.as_ref() {
+        check_not_immutable(new)?;
+        check_not_append_only(new)?;
+    }
+    check_sticky_removal(&old_dir, &old, credentials)?;
+    if let Some(new) = new.as_ref() {
+        check_sticky_removal(&new_dir, new, credentials)?;
+    }
+
+    if is_exchange {
+        old_dir.exchange(&old_name, &new_dir, &new_name)?;
+    } else {
+        old_dir.rename(&old_name, &new_dir, &new_name)?;
+    }
     Ok(0)
 }
 
@@ -533,5 +956,323 @@ pub fn sys_syncfs(fd: i32) -> AxResult<isize> {
     };
 
     loc.filesystem().flush()?;
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// Extended attributes (xattr)
+// ---------------------------------------------------------------------------
+
+fn resolve_xattr_target(
+    dirfd: i32,
+    path: *const c_char,
+    follow: bool,
+) -> AxResult<Location> {
+    let path = vm_load_string(path)?;
+    debug!("resolve_xattr_target: dirfd={dirfd}, path={path:?}, follow={follow}");
+
+    let credentials = VfsCredentials::effective();
+    if !path.is_empty() {
+        check_path_len(&path)?;
+        with_fs_at(dirfd, &path, |fs| check_path_search(fs, &path, credentials))?;
+    }
+    let res = resolve_at(dirfd, (!path.is_empty()).then(|| path.as_str()), if follow {
+        0
+    } else {
+        AT_SYMLINK_NOFOLLOW
+    })?;
+    res.into_file().ok_or(AxError::BadFileDescriptor)
+}
+
+fn resolve_xattr_fd(fd: i32) -> AxResult<Option<Location>> {
+    debug!("resolve_xattr_fd: fd={fd}");
+    let file_like = get_file_like(fd)?;
+    if is_o_path_fd(file_like.as_ref()) {
+        return Err(AxError::BadFileDescriptor);
+    }
+    if let Some(file) = file_like.downcast_ref::<File>() {
+        Ok(Some(file.inner().location().clone()))
+    } else if let Some(dir) = file_like.downcast_ref::<Directory>() {
+        Ok(Some(dir.inner().clone()))
+    } else if let Some(pipe) = file_like.downcast_ref::<NamedPipe>() {
+        Ok(Some(pipe.location().clone()))
+    } else if file_like.downcast_ref::<Socket>().is_some() {
+        // Sockets are valid fds but do not support xattr.
+        Ok(None)
+    } else {
+        Err(AxError::BadFileDescriptor)
+    }
+}
+
+fn is_o_path_fd(file_like: &dyn FileLike) -> bool {
+    file_like.access_mode() & O_PATH != 0
+}
+
+fn check_not_o_path_fd(fd: i32) -> AxResult<()> {
+    let file_like = get_file_like(fd)?;
+    if is_o_path_fd(file_like.as_ref()) {
+        Err(AxError::BadFileDescriptor)
+    } else {
+        Ok(())
+    }
+}
+
+fn path_refers_to_o_path_fd(path: &str) -> bool {
+    let Some(fd) = proc_fd_path_fd(path) else {
+        return false;
+    };
+    get_file_like(fd as _)
+        .map(|file_like| is_o_path_fd(file_like.as_ref()))
+        .unwrap_or(false)
+}
+
+fn proc_fd_path_fd(path: &str) -> Option<u32> {
+    if let Some(fd) = path.strip_prefix("/proc/self/fd/") {
+        return parse_proc_fd_tail(fd);
+    }
+
+    let rest = path.strip_prefix("/proc/")?;
+    let (pid, fd) = rest.split_once("/fd/")?;
+    let pid = pid.parse::<u64>().ok()?;
+    let curr = current();
+    let thread = curr.as_thread();
+    let current_pid = u64::from(thread.proc_data.proc.pid());
+    let current_tid = curr.id().as_u64();
+    if pid == current_pid || pid == current_tid {
+        parse_proc_fd_tail(fd)
+    } else {
+        None
+    }
+}
+
+fn parse_proc_fd_tail(fd: &str) -> Option<u32> {
+    if fd.is_empty() || fd.contains('/') {
+        None
+    } else {
+        fd.parse().ok()
+    }
+}
+
+// setxattr — follow symlinks
+pub fn sys_setxattr(
+    path: *const c_char,
+    name: *const c_char,
+    value: *const u8,
+    size: usize,
+    flags: u32,
+) -> AxResult<isize> {
+    let name = vm_load_string(name)?;
+    debug!("sys_setxattr <= path: {path:?}, name: {name}, size: {size}, flags: {flags}");
+
+    let loc = resolve_xattr_target(AT_FDCWD, path, true)?;
+    check_writable_filesystem(&loc)?;
+    check_not_immutable(&loc)?;
+    check_not_append_only(&loc)?;
+    let value_buf = read_xattr_value(value, size)?;
+    do_setxattr(&loc, name.as_bytes(), &value_buf, flags)?;
+    Ok(0)
+}
+
+// lsetxattr — do NOT follow symlinks
+pub fn sys_lsetxattr(
+    path: *const c_char,
+    name: *const c_char,
+    value: *const u8,
+    size: usize,
+    flags: u32,
+) -> AxResult<isize> {
+    let name = vm_load_string(name)?;
+    debug!("sys_lsetxattr <= path: {path:?}, name: {name}, size: {size}, flags: {flags}");
+
+    let loc = resolve_xattr_target(AT_FDCWD, path, false)?;
+    check_writable_filesystem(&loc)?;
+    check_not_immutable(&loc)?;
+    check_not_append_only(&loc)?;
+    let value_buf = read_xattr_value(value, size)?;
+    do_setxattr(&loc, name.as_bytes(), &value_buf, flags)?;
+    Ok(0)
+}
+
+// fsetxattr — operate on fd
+pub fn sys_fsetxattr(
+    fd: i32,
+    name: *const c_char,
+    value: *const u8,
+    size: usize,
+    flags: u32,
+) -> AxResult<isize> {
+    let name = vm_load_string(name)?;
+    debug!("sys_fsetxattr <= fd: {fd}, name: {name}, size: {size}, flags: {flags}");
+
+    let loc = resolve_xattr_fd(fd)?;
+    let loc = loc.ok_or(AxError::OperationNotSupported)?;
+    check_writable_filesystem(&loc)?;
+    check_not_immutable(&loc)?;
+    check_not_append_only(&loc)?;
+    let value_buf = read_xattr_value(value, size)?;
+    do_setxattr(&loc, name.as_bytes(), &value_buf, flags)?;
+    Ok(0)
+}
+
+/// Read xattr value from user space into a kernel buffer (validates user pointer).
+/// Size limit is enforced by `do_setxattr`; this function only validates the
+/// user pointer and copies the data.
+fn read_xattr_value(value: *const u8, size: usize) -> AxResult<Vec<u8>> {
+    if size == 0 {
+        return Ok(vec![]);
+    }
+    let mut buf: Vec<core::mem::MaybeUninit<u8>> = vec![core::mem::MaybeUninit::uninit(); size];
+    vm_read_slice(value, &mut buf)?;
+    // SAFETY: vm_read_slice succeeded, all elements are initialized.
+    Ok(unsafe { core::mem::transmute::<Vec<core::mem::MaybeUninit<u8>>, Vec<u8>>(buf) })
+}
+
+// getxattr — follow symlinks
+pub fn sys_getxattr(
+    path: *const c_char,
+    name: *const c_char,
+    value: *mut u8,
+    size: usize,
+) -> AxResult<isize> {
+    let name = vm_load_string(name)?;
+    debug!("sys_getxattr <= path: {path:?}, name: {name}, size: {size}");
+
+    let loc = resolve_xattr_target(AT_FDCWD, path, true)?;
+    let data = do_getxattr(&loc, name.as_bytes())?;
+    xattr_copy_to_user(value, size, &data)
+}
+
+// lgetxattr — do NOT follow symlinks
+pub fn sys_lgetxattr(
+    path: *const c_char,
+    name: *const c_char,
+    value: *mut u8,
+    size: usize,
+) -> AxResult<isize> {
+    let name = vm_load_string(name)?;
+    debug!("sys_lgetxattr <= path: {path:?}, name: {name}, size: {size}");
+
+    let loc = resolve_xattr_target(AT_FDCWD, path, false)?;
+    let data = do_getxattr(&loc, name.as_bytes())?;
+    xattr_copy_to_user(value, size, &data)
+}
+
+// fgetxattr — operate on fd
+pub fn sys_fgetxattr(
+    fd: i32,
+    name: *const c_char,
+    value: *mut u8,
+    size: usize,
+) -> AxResult<isize> {
+    let name = vm_load_string(name)?;
+    debug!("sys_fgetxattr <= fd: {fd}, name: {name}, size: {size}");
+
+    let loc = resolve_xattr_fd(fd)?;
+    let loc = loc.ok_or(AxError::from(LinuxError::ENODATA))?;
+    let data = do_getxattr(&loc, name.as_bytes())?;
+    xattr_copy_to_user(value, size, &data)
+}
+
+// listxattr — follow symlinks
+pub fn sys_listxattr(
+    path: *const c_char,
+    list: *mut u8,
+    size: usize,
+) -> AxResult<isize> {
+    debug!("sys_listxattr <= path: {path:?}, size: {size}");
+
+    let loc = resolve_xattr_target(AT_FDCWD, path, true)?;
+    let data = do_listxattr(&loc)?;
+    xattr_copy_to_user(list, size, &data)
+}
+
+// llistxattr — do NOT follow symlinks
+pub fn sys_llistxattr(
+    path: *const c_char,
+    list: *mut u8,
+    size: usize,
+) -> AxResult<isize> {
+    debug!("sys_llistxattr <= path: {path:?}, size: {size}");
+
+    let loc = resolve_xattr_target(AT_FDCWD, path, false)?;
+    let data = do_listxattr(&loc)?;
+    xattr_copy_to_user(list, size, &data)
+}
+
+// flistxattr — operate on fd
+pub fn sys_flistxattr(
+    fd: i32,
+    list: *mut u8,
+    size: usize,
+) -> AxResult<isize> {
+    debug!("sys_flistxattr <= fd: {fd}, size: {size}");
+
+    let loc = resolve_xattr_fd(fd)?;
+    let loc = match loc {
+        Some(loc) => loc,
+        None => return Ok(0),
+    };
+    let data = do_listxattr(&loc)?;
+    xattr_copy_to_user(list, size, &data)
+}
+
+/// Copy xattr value/list to user space with size checks.
+fn xattr_copy_to_user(buf: *mut u8, size: usize, data: &[u8]) -> AxResult<isize> {
+    if size == 0 {
+        return Ok(data.len() as isize);
+    }
+    if size < data.len() {
+        return Err(AxError::OutOfRange);
+    }
+    vm_write_slice(buf, data)?;
+    Ok(data.len() as isize)
+}
+
+// removexattr — follow symlinks
+pub fn sys_removexattr(
+    path: *const c_char,
+    name: *const c_char,
+) -> AxResult<isize> {
+    let name = vm_load_string(name)?;
+    debug!("sys_removexattr <= path: {path:?}, name: {name}");
+
+    let loc = resolve_xattr_target(AT_FDCWD, path, true)?;
+    check_writable_filesystem(&loc)?;
+    check_not_immutable(&loc)?;
+    check_not_append_only(&loc)?;
+    do_removexattr(&loc, name.as_bytes())?;
+    Ok(0)
+}
+
+// lremovexattr — do NOT follow symlinks
+pub fn sys_lremovexattr(
+    path: *const c_char,
+    name: *const c_char,
+) -> AxResult<isize> {
+    let name = vm_load_string(name)?;
+    debug!("sys_lremovexattr <= path: {path:?}, name: {name}");
+
+    let loc = resolve_xattr_target(AT_FDCWD, path, false)?;
+    check_writable_filesystem(&loc)?;
+    check_not_immutable(&loc)?;
+    check_not_append_only(&loc)?;
+    do_removexattr(&loc, name.as_bytes())?;
+    Ok(0)
+}
+
+// fremovexattr — operate on fd
+pub fn sys_fremovexattr(
+    fd: i32,
+    name: *const c_char,
+) -> AxResult<isize> {
+    let name = vm_load_string(name)?;
+    debug!("sys_fremovexattr <= fd: {fd}, name: {name}");
+
+    let loc = resolve_xattr_fd(fd)?;
+    let loc = loc.ok_or(AxError::from(LinuxError::ENODATA))?;
+    check_writable_filesystem(&loc)?;
+    check_not_immutable(&loc)?;
+    check_not_append_only(&loc)?;
+    do_removexattr(&loc, name.as_bytes())?;
     Ok(0)
 }

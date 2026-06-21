@@ -7,17 +7,17 @@ use axtask::{
     future::{self, block_on},
 };
 use linux_raw_sys::general::{
-    MINSIGSTKSZ, SI_TKILL, SI_USER, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK, kernel_sigaction, siginfo,
-    timespec,
+    MINSIGSTKSZ, RLIMIT_SIGPENDING, SI_TKILL, SI_USER, SIG_BLOCK, SIG_SETMASK, SIG_UNBLOCK,
+    kernel_sigaction, siginfo, timespec, SS_DISABLE, SS_ONSTACK,
 };
 use starry_process::Pid;
-use starry_signal::{SignalInfo, SignalSet, SignalStack, Signo};
+use starry_signal::{SignalDisposition, SignalInfo, SignalSet, SignalStack, Signo};
 use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{
     task::{
-        AsThread, block_next_signal, check_signals, processes, send_signal_to_process,
-        send_signal_to_process_group, send_signal_to_thread,
+        AsThread, block_next_signal, check_signals, get_process_data, get_task, processes,
+        do_exit, send_signal_to_process, send_signal_to_thread,
     },
     time::TimeValueLike,
 };
@@ -72,12 +72,15 @@ pub fn sys_rt_sigaction(
     oldact: *mut kernel_sigaction,
     sigsetsize: usize,
 ) -> AxResult<isize> {
-    check_sigset_size(sigsetsize)?;
-
-    let signo = parse_signo(signo)?;
+    let Some(signo) = Signo::from_repr(signo as u8) else {
+        warn!("sys_rt_sigaction: invalid signo {signo}");
+        return Err(AxError::InvalidInput);
+    };
     if matches!(signo, Signo::SIGKILL | Signo::SIGSTOP) {
+        warn!("sys_rt_sigaction: cannot change action for {signo:?}");
         return Err(AxError::InvalidInput);
     }
+    check_sigset_size(sigsetsize)?;
 
     let curr = current();
     let mut actions = curr.as_thread().proc_data.signal.actions.lock();
@@ -110,17 +113,68 @@ fn make_siginfo(signo: u32, code: i32) -> AxResult<Option<SignalInfo>> {
     )))
 }
 
+fn is_default_sigabrt_for_current(tgid: Pid, tid: Pid, signo: Signo) -> bool {
+    if signo != Signo::SIGABRT {
+        return false;
+    }
+
+    let curr = current();
+    if curr.as_thread().proc_data.proc.pid() != tgid || (curr.id().as_u64() as Pid) != tid {
+        return false;
+    }
+
+    matches!(
+        &curr.as_thread().proc_data.signal.actions.lock()[Signo::SIGABRT].disposition,
+        SignalDisposition::Default
+    )
+}
+
+fn abort_exit_status() -> i32 {
+    (Signo::SIGABRT as i32) | 0x80
+}
+
+fn check_kill_permission(pid: Pid, sig: &Option<SignalInfo>) -> AxResult<()> {
+    if sig.is_none() {
+        return Ok(());
+    }
+
+    let curr = current();
+    let curr_ids = curr.as_thread().proc_data.ids();
+    if curr_ids.1 == 0 {
+        return Ok(());
+    }
+
+    let target = get_process_data(pid)?;
+    let target_ids = target.ids();
+    if curr_ids.0 == target_ids.0
+        || curr_ids.0 == target_ids.2
+        || curr_ids.1 == target_ids.0
+        || curr_ids.1 == target_ids.2
+    {
+        Ok(())
+    } else {
+        Err(AxError::OperationNotPermitted)
+    }
+}
+
 pub fn sys_kill(pid: i32, signo: u32) -> AxResult<isize> {
     debug!("sys_kill: pid = {pid}, signo = {signo}");
     let sig = make_siginfo(signo, SI_USER as _)?;
 
     match pid {
         1.. => {
+            check_kill_permission(pid as _, &sig)?;
             send_signal_to_process(pid as _, sig)?;
         }
         0 => {
             let pgid = current().as_thread().proc_data.proc.group().pgid();
-            send_signal_to_process_group(pgid, sig)?;
+            let pg = crate::task::get_process_group(pgid)?;
+            for proc in pg.processes() {
+                if check_kill_permission(proc.pid(), &sig).is_err() {
+                    continue;
+                }
+                let _ = send_signal_to_process(proc.pid(), sig.clone());
+            }
         }
         -1 => {
             let curr_pid = current().as_thread().proc_data.proc.pid();
@@ -134,25 +188,77 @@ pub fn sys_kill(pid: i32, signo: u32) -> AxResult<isize> {
                     if proc_data.proc.is_init() || proc_data.proc.pid() == curr_pid {
                         continue;
                     }
+                    if check_kill_permission(proc_data.proc.pid(), &Some(sig.clone())).is_err() {
+                        continue;
+                    }
                     let _ = send_signal_to_process(proc_data.proc.pid(), Some(sig.clone()));
                 }
             }
         }
         ..-1 => {
-            send_signal_to_process_group((-pid) as Pid, sig)?;
+            let pg = crate::task::get_process_group((-pid) as Pid)?;
+            let mut delivered = false;
+            for proc in pg.processes() {
+                if check_kill_permission(proc.pid(), &sig).is_err() {
+                    continue;
+                }
+                if send_signal_to_process(proc.pid(), sig.clone()).is_ok() {
+                    delivered = true;
+                }
+            }
+            if !delivered {
+                return Err(AxError::NoSuchProcess);
+            }
         }
     }
     Ok(0)
 }
 
 pub fn sys_tkill(tid: Pid, signo: u32) -> AxResult<isize> {
-    let sig = make_siginfo(signo, SI_TKILL)?;
+    if tid == Pid::MAX {
+        return Err(AxError::InvalidInput);
+    }
+    let signo = parse_signo(signo)?;
+    let curr_pid = current().as_thread().proc_data.proc.pid();
+    if is_default_sigabrt_for_current(curr_pid, tid, signo) {
+        do_exit(abort_exit_status(), true);
+        return Ok(0);
+    }
+    let sig = Some(SignalInfo::new_user(signo, SI_TKILL, curr_pid));
     send_signal_to_thread(None, tid, sig)?;
     Ok(0)
 }
 
-pub fn sys_tgkill(tgid: Pid, tid: Pid, signo: u32) -> AxResult<isize> {
-    let sig = make_siginfo(signo, SI_TKILL)?;
+pub fn sys_tgkill(tgid: i32, tid: i32, signo: u32) -> AxResult<isize> {
+    if tgid <= 0 || tid <= 0 {
+        return Err(AxError::InvalidInput);
+    }
+    let tgid = tgid as Pid;
+    let tid = tid as Pid;
+    let signo = parse_signo(signo)?;
+    if is_default_sigabrt_for_current(tgid, tid, signo) {
+        do_exit(abort_exit_status(), true);
+        return Ok(0);
+    }
+    let sig = Some(SignalInfo::new_user(
+        signo,
+        SI_TKILL,
+        current().as_thread().proc_data.proc.pid(),
+    ));
+    if let Some(sig) = &sig {
+        if sig.signo().is_realtime() {
+            let target = get_task(tid)?;
+            let thread = target
+                .try_as_thread()
+                .ok_or(AxError::OperationNotPermitted)?;
+            if tgid != 0 && thread.proc_data.proc.pid() != tgid {
+                return Err(AxError::NoSuchProcess);
+            }
+            if thread.proc_data.rlim.read()[RLIMIT_SIGPENDING].current == 0 {
+                return Err(AxError::WouldBlock);
+            }
+        }
+    }
     send_signal_to_thread(Some(tgid), tid, sig)?;
     Ok(0)
 }
@@ -186,7 +292,16 @@ pub fn sys_rt_sigqueueinfo(
     check_sigset_size(sigsetsize)?;
 
     let sig = make_queue_signal_info(tgid, signo, sig)?;
-    send_signal_to_process(tgid, sig)?;
+    let curr_pid = current().as_thread().proc_data.proc.pid();
+    if let Ok(task) = get_task(tgid)
+        && task
+            .try_as_thread()
+            .is_some_and(|thread| thread.proc_data.proc.pid() == curr_pid)
+    {
+        send_signal_to_thread(Some(curr_pid), tgid, sig)?;
+    } else {
+        send_signal_to_process(tgid, sig)?;
+    }
     Ok(0)
 }
 
@@ -235,12 +350,10 @@ pub fn sys_rt_sigtimedwait(
     let signal = &thr.signal;
 
     let old_blocked = signal.blocked();
-    signal.set_blocked(old_blocked & !set);
 
     uctx.set_retval(-LinuxError::EINTR.code() as usize);
     let fut = poll_fn(|cx| {
         if let Some(sig) = signal.dequeue_signal(&set) {
-            signal.set_blocked(old_blocked);
             Poll::Ready(Some(sig))
         } else if check_signals(thr, uctx, Some(old_blocked)) {
             Poll::Ready(None)
@@ -252,7 +365,6 @@ pub fn sys_rt_sigtimedwait(
 
     let Ok(sig) = block_on(future::timeout(timeout, fut)) else {
         // Timeout
-        signal.set_blocked(old_blocked);
         return Err(AxError::WouldBlock);
     };
     let Some(sig) = sig else {
@@ -292,6 +404,7 @@ pub fn sys_rt_sigsuspend(
         Poll::Pending
     }));
 
+    thr.signal.set_blocked(old_blocked);
     // sigsuspend always returns -EINTR
     Err(AxError::Interrupted)
 }
@@ -306,6 +419,9 @@ pub fn sys_sigaltstack(ss: *const SignalStack, old_ss: *mut SignalStack) -> AxRe
 
     if let Some(ss) = ss.nullable() {
         let ss = unsafe { ss.vm_read_uninit()?.assume_init() };
+        if ss.flags & !(SS_DISABLE | SS_ONSTACK) != 0 {
+            return Err(AxError::InvalidInput);
+        }
         if ss.size <= MINSIGSTKSZ as usize {
             return Err(AxError::NoMemory);
         }

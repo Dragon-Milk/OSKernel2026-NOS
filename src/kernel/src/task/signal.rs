@@ -1,12 +1,24 @@
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    future::poll_fn,
+    sync::atomic::{AtomicBool, Ordering},
+    task::Poll,
+};
 
 use axerrno::{AxError, AxResult};
 use axhal::uspace::UserContext;
-use axtask::{current, TaskInner};
+use axtask::{current, future::block_on, TaskInner};
 use starry_process::{init_proc, Pid, Process};
 use starry_signal::{SignalInfo, SignalOSAction, SignalSet};
 
 use super::{do_exit, get_process_data, get_process_group, get_task, AsThread, Thread};
+
+fn signal_exit_status(signo: starry_signal::Signo, core_dump: bool) -> i32 {
+    let mut status = signo as i32;
+    if core_dump {
+        status |= 0x80;
+    }
+    status
+}
 
 pub fn check_signals(
     thr: &Thread,
@@ -20,18 +32,35 @@ pub fn check_signals(
     let signo = sig.signo();
     match os_action {
         SignalOSAction::Terminate => {
-            do_exit(signo as i32, true);
+            do_exit(signal_exit_status(signo, false), true);
         }
         SignalOSAction::CoreDump => {
             // TODO: implement core dump
-            do_exit(128 + signo as i32, true);
+            do_exit(signal_exit_status(signo, true), true);
         }
         SignalOSAction::Stop => {
-            // TODO: implement stop
-            do_exit(1, true);
+            thr.proc_data.mark_stopped(signo);
+            if let Some(parent) = thr.proc_data.proc.parent()
+                && let Ok(data) = get_process_data(parent.pid())
+            {
+                data.child_exit_event.wake();
+            }
+            block_on(poll_fn(|cx| {
+                if thr.proc_data.child_wait_state().stopped.is_none() {
+                    Poll::Ready(())
+                } else {
+                    thr.proc_data.stopped_event.register(cx.waker());
+                    Poll::Pending
+                }
+            }));
         }
         SignalOSAction::Continue => {
-            // TODO: implement continue
+            thr.proc_data.mark_continued();
+            if let Some(parent) = thr.proc_data.proc.parent()
+                && let Ok(data) = get_process_data(parent.pid())
+            {
+                data.child_exit_event.wake();
+            }
         }
         SignalOSAction::Handler => {
             // do nothing
@@ -107,6 +136,14 @@ pub fn send_signal_to_process(pid: Pid, sig: Option<SignalInfo>) -> AxResult<()>
     if let Some(sig) = sig {
         let signo = sig.signo();
         info!("Send signal {signo:?} to process {pid}");
+        if signo == starry_signal::Signo::SIGCONT {
+            proc_data.mark_continued();
+            if let Some(parent) = proc_data.proc.parent()
+                && let Ok(data) = get_process_data(parent.pid())
+            {
+                data.child_exit_event.wake();
+            }
+        }
         if let Some(tid) = proc_data.signal.send_signal(sig)
             && let Ok(task) = get_task(tid)
         {
@@ -144,7 +181,7 @@ pub fn raise_signal_fatal(sig: SignalInfo) -> AxResult<()> {
         task.interrupt();
     } else {
         // No task wants to handle the signal, abort the task
-        do_exit(signo as i32, true);
+        do_exit(signal_exit_status(signo, false), true);
     }
 
     Ok(())

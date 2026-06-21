@@ -4,18 +4,26 @@ use core::{
     task::Context,
 };
 
-use axerrno::{AxError, AxResult};
+use axerrno::{AxError, AxResult, LinuxError};
 use axfs::{FS_CONTEXT, FileFlags, OpenOptions};
 use axio::{Seek, SeekFrom};
 use axpoll::{IoEvents, Pollable};
 use axtask::current;
-use linux_raw_sys::general::__kernel_off_t;
+use linux_raw_sys::general::{
+    __kernel_off_t, RLIM64_INFINITY, RLIMIT_FSIZE, RWF_APPEND, RWF_DSYNC, RWF_HIPRI, RWF_NOWAIT,
+    RWF_SYNC,
+};
 use starry_vm::{VmMutPtr, VmPtr};
 use syscalls::Sysno;
 
 use crate::{
-    file::{File, FileLike, Pipe, get_file_like},
+    file::{
+        AccessMode, Directory, File, FileLike, NamedPipe, Pipe, Socket, VfsCredentials,
+        check_not_append_only, check_not_immutable,
+        check_permission, check_writable_filesystem, get_file_like,
+    },
     mm::{IoVec, IoVectorBuf, UserConstPtr, VmBytes, VmBytesMut},
+    task::AsThread,
 };
 
 struct DummyFd;
@@ -57,8 +65,9 @@ pub fn sys_read(fd: i32, buf: *mut u8, len: usize) -> AxResult<isize> {
 pub fn sys_readv(fd: i32, iov: *const IoVec, iovcnt: usize) -> AxResult<isize> {
     debug!("sys_readv <= fd: {fd}, iovcnt: {iovcnt}");
     let f = get_file_like(fd)?;
-    f.read(&mut IoVectorBuf::new(iov, iovcnt)?.into_io())
-        .map(|n| n as _)
+    let iov = IoVectorBuf::new(iov, iovcnt)?;
+    iov.validate_writable()?;
+    f.read(&mut iov.into_io()).map(|n| n as _)
 }
 
 /// Write data to the file indicated by `fd`.
@@ -66,7 +75,13 @@ pub fn sys_readv(fd: i32, iov: *const IoVec, iovcnt: usize) -> AxResult<isize> {
 /// Return the written size if success.
 pub fn sys_write(fd: i32, buf: *mut u8, len: usize) -> AxResult<isize> {
     debug!("sys_write <= fd: {fd}, buf: {buf:p}, len: {len}");
-    let written = get_file_like(fd)?.write(&mut VmBytes::new(buf, len))?;
+    let f = get_file_like(fd)?;
+    // Check immutable for regular files before writing.
+    if let Some(file) = f.downcast_ref::<File>() {
+        check_not_immutable(file.inner().location())?;
+        check_not_append_only(file.inner().location())?;
+    }
+    let written = f.write(&mut VmBytes::new(buf, len))?;
     crate::perf::perf_observe_user_write(fd, buf, written);
     Ok(written as _)
 }
@@ -74,9 +89,23 @@ pub fn sys_write(fd: i32, buf: *mut u8, len: usize) -> AxResult<isize> {
 pub fn sys_writev(fd: i32, iov: *const IoVec, iovcnt: usize) -> AxResult<isize> {
     debug!("sys_writev <= fd: {fd}, iovcnt: {iovcnt}");
     let f = get_file_like(fd)?;
-    let written = f.write(&mut IoVectorBuf::new(iov, iovcnt)?.into_io())?;
+    // Check immutable for regular files before writing.
+    if let Some(file) = f.downcast_ref::<File>() {
+        check_not_immutable(file.inner().location())?;
+        check_not_append_only(file.inner().location())?;
+    }
+    let iov_buf = IoVectorBuf::new(iov, iovcnt)?;
+    iov_buf.validate_readable()?;
+    let written = f.write(&mut iov_buf.into_io())?;
     crate::perf::perf_observe_user_writev(fd, iov, iovcnt, written);
     Ok(written as _)
+}
+
+fn check_pipe_offset_io(fd: c_int) -> AxResult<()> {
+    if Pipe::from_fd(fd).is_ok() || NamedPipe::from_fd(fd).is_ok() {
+        return Err(AxError::from(LinuxError::ESPIPE));
+    }
+    Ok(())
 }
 
 pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> AxResult<isize> {
@@ -87,6 +116,7 @@ pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> AxResult<i
         2 => SeekFrom::End(offset as _),
         _ => return Err(AxError::InvalidInput),
     };
+    check_pipe_offset_io(fd)?;
     let off = File::from_fd(fd)?.inner().seek(pos)?;
     Ok(off as _)
 }
@@ -94,22 +124,53 @@ pub fn sys_lseek(fd: c_int, offset: __kernel_off_t, whence: c_int) -> AxResult<i
 pub fn sys_truncate(path: UserConstPtr<c_char>, length: __kernel_off_t) -> AxResult<isize> {
     let path = path.get_as_str()?;
     debug!("sys_truncate <= {path:?} {length}");
+    if path.is_empty() {
+        return Err(AxError::NotFound);
+    }
     if length < 0 {
         return Err(AxError::InvalidInput);
     }
+    let length = length as u64;
     let file = OpenOptions::new()
         .write(true)
         .open(&FS_CONTEXT.lock(), path)?
         .into_file()?;
-    file.access(FileFlags::WRITE)?.set_len(length as _)?;
+    let loc = file.location();
+    check_permission(loc, VfsCredentials::effective(), AccessMode::WRITE)?;
+    check_writable_filesystem(loc)?;
+    check_not_immutable(loc)?;
+    check_not_append_only(loc)?;
+    check_file_size_limit(length)?;
+    file.access(FileFlags::WRITE)?.set_len(length)?;
     Ok(0)
 }
 
 pub fn sys_ftruncate(fd: c_int, length: __kernel_off_t) -> AxResult<isize> {
     debug!("sys_ftruncate <= {fd} {length}");
-    let f = File::from_fd(fd)?;
-    f.inner().access(FileFlags::WRITE)?.set_len(length as _)?;
+    let file_like = get_file_like(fd)?;
+    let Some(f) = file_like.downcast_ref::<File>() else {
+        return Err(AxError::InvalidInput);
+    };
+    if length < 0 {
+        return Err(AxError::InvalidInput);
+    }
+    if !f.inner().flags().contains(FileFlags::WRITE) {
+        return Err(AxError::InvalidInput);
+    }
+    let loc = f.inner().location();
+    check_not_immutable(loc)?;
+    check_not_append_only(loc)?;
+    let length = length as u64;
+    f.inner().access(FileFlags::WRITE)?.set_len(length)?;
     Ok(0)
+}
+
+fn check_file_size_limit(length: u64) -> AxResult<()> {
+    let limit = current().as_thread().proc_data.rlim.read()[RLIMIT_FSIZE].current;
+    if limit != RLIM64_INFINITY as u64 && length > limit {
+        return Err(AxError::from(LinuxError::EFBIG));
+    }
+    Ok(())
 }
 
 pub fn sys_fallocate(
@@ -129,18 +190,31 @@ pub fn sys_fallocate(
     Ok(0)
 }
 
+fn sync_fd(fd: c_int, data_only: bool) -> AxResult<isize> {
+    let file_like = get_file_like(fd)?;
+    if file_like.is::<Pipe>() || file_like.is::<NamedPipe>() || file_like.is::<Socket>() {
+        return Err(AxError::InvalidInput);
+    }
+
+    let Some(f) = file_like.downcast_ref::<File>() else {
+        return Err(if file_like.is::<Directory>() {
+            AxError::IsADirectory
+        } else {
+            AxError::BrokenPipe
+        });
+    };
+    f.inner().sync(data_only)?;
+    Ok(0)
+}
+
 pub fn sys_fsync(fd: c_int) -> AxResult<isize> {
     debug!("sys_fsync <= {fd}");
-    let f = File::from_fd(fd)?;
-    f.inner().sync(false)?;
-    Ok(0)
+    sync_fd(fd, false)
 }
 
 pub fn sys_fdatasync(fd: c_int) -> AxResult<isize> {
     debug!("sys_fdatasync <= {fd}");
-    let f = File::from_fd(fd)?;
-    f.inner().sync(true)?;
-    Ok(0)
+    sync_fd(fd, true)
 }
 
 pub fn sys_fadvise64(
@@ -160,10 +234,11 @@ pub fn sys_fadvise64(
 }
 
 pub fn sys_pread64(fd: c_int, buf: *mut u8, len: usize, offset: __kernel_off_t) -> AxResult<isize> {
-    let f = File::from_fd(fd)?;
     if offset < 0 {
         return Err(AxError::InvalidInput);
     }
+    check_pipe_offset_io(fd)?;
+    let f = File::from_fd(fd)?;
     let read = f.inner().read_at(VmBytesMut::new(buf, len), offset as _)?;
     Ok(read as _)
 }
@@ -174,10 +249,16 @@ pub fn sys_pwrite64(
     len: usize,
     offset: __kernel_off_t,
 ) -> AxResult<isize> {
+    check_pipe_offset_io(fd)?;
+    if offset < 0 {
+        return Err(AxError::InvalidInput);
+    }
     if len == 0 {
         return Ok(0);
     }
     let f = File::from_fd(fd)?;
+    check_not_immutable(f.inner().location())?;
+    check_not_append_only(f.inner().location())?;
     let write = f.inner().write_at(VmBytes::new(buf, len), offset as _)?;
     Ok(write as _)
 }
@@ -188,6 +269,9 @@ pub fn sys_preadv(
     iovcnt: usize,
     offset: __kernel_off_t,
 ) -> AxResult<isize> {
+    if offset < 0 {
+        return Err(AxError::InvalidInput);
+    }
     sys_preadv2(fd, iov, iovcnt, offset, 0)
 }
 
@@ -197,7 +281,26 @@ pub fn sys_pwritev(
     iovcnt: usize,
     offset: __kernel_off_t,
 ) -> AxResult<isize> {
+    if offset < 0 {
+        return Err(AxError::InvalidInput);
+    }
     sys_pwritev2(fd, iov, iovcnt, offset, 0)
+}
+
+fn check_rwf_flags(flags: u32) -> AxResult<()> {
+    const KNOWN_RWF_FLAGS: u32 = RWF_HIPRI | RWF_DSYNC | RWF_SYNC | RWF_NOWAIT | RWF_APPEND;
+
+    if flags == 0 {
+        return Ok(());
+    }
+
+    let unsupported = flags & KNOWN_RWF_FLAGS;
+    let unknown = flags & !KNOWN_RWF_FLAGS;
+    if unsupported != 0 || unknown != 0 {
+        return Err(AxError::OperationNotSupported);
+    }
+
+    Ok(())
 }
 
 pub fn sys_preadv2(
@@ -205,12 +308,22 @@ pub fn sys_preadv2(
     iov: *const IoVec,
     iovcnt: usize,
     offset: __kernel_off_t,
-    _flags: u32,
+    flags: u32,
 ) -> AxResult<isize> {
-    debug!("sys_preadv2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {_flags}");
+    debug!("sys_preadv2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {flags}");
+    check_rwf_flags(flags)?;
+    if offset == -1 {
+        return sys_readv(fd, iov, iovcnt);
+    }
+    if offset < 0 {
+        return Err(AxError::InvalidInput);
+    }
+    check_pipe_offset_io(fd)?;
     let f = File::from_fd(fd)?;
+    let iov = IoVectorBuf::new(iov, iovcnt)?;
+    iov.validate_writable()?;
     f.inner()
-        .read_at(IoVectorBuf::new(iov, iovcnt)?.into_io(), offset as _)
+        .read_at(iov.into_io(), offset as _)
         .map(|n| n as _)
 }
 
@@ -219,12 +332,24 @@ pub fn sys_pwritev2(
     iov: *const IoVec,
     iovcnt: usize,
     offset: __kernel_off_t,
-    _flags: u32,
+    flags: u32,
 ) -> AxResult<isize> {
-    debug!("sys_pwritev2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {_flags}");
+    debug!("sys_pwritev2 <= fd: {fd}, iovcnt: {iovcnt}, offset: {offset}, flags: {flags}");
+    check_rwf_flags(flags)?;
+    if offset == -1 {
+        return sys_writev(fd, iov, iovcnt);
+    }
+    if offset < 0 {
+        return Err(AxError::InvalidInput);
+    }
+    check_pipe_offset_io(fd)?;
     let f = File::from_fd(fd)?;
+    check_not_immutable(f.inner().location())?;
+    check_not_append_only(f.inner().location())?;
+    let iov = IoVectorBuf::new(iov, iovcnt)?;
+    iov.validate_readable()?;
     f.inner()
-        .read_at(IoVectorBuf::new(iov, iovcnt)?.into_io(), offset as _)
+        .write_at(iov.into_io(), offset as _)
         .map(|n| n as _)
 }
 

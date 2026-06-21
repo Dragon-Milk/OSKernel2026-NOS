@@ -19,6 +19,8 @@
 .local-toolchains/
 logs/
 temp/
+REASONIX.md
+resonix.toml
 
 # workflow
 .codex/
@@ -26,6 +28,7 @@ temp/
 .claude/
 **/.claude/
 workflow/
+REASONIX.md
 
 # target
 kernel-rv

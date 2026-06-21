@@ -2,7 +2,7 @@ use alloc::sync::Arc;
 
 use inherit_methods_macro::inherit_methods;
 
-use crate::{DirEntry, VfsResult};
+use crate::{DirEntry, VfsError, VfsResult};
 
 pub struct StatFs {
     pub fs_type: u32,
@@ -30,6 +30,11 @@ pub trait FilesystemOps: Send + Sync {
     /// Returns statistics about the filesystem
     fn stat(&self) -> VfsResult<StatFs>;
 
+    /// Updates mount flags for filesystems that track remount state.
+    fn set_mount_flags(&self, _flags: u32) -> VfsResult<()> {
+        Err(VfsError::OperationNotSupported)
+    }
+
     /// Flushes the filesystem, ensuring all data is written to disk
     fn flush(&self) -> VfsResult<()> {
         Ok(())
@@ -53,5 +58,9 @@ impl Filesystem {
 impl Filesystem {
     pub fn new(ops: Arc<dyn FilesystemOps>) -> Self {
         Self { ops }
+    }
+
+    pub fn set_mount_flags(&self, flags: u32) -> VfsResult<()> {
+        self.ops.set_mount_flags(flags)
     }
 }

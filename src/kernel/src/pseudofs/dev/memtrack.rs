@@ -7,12 +7,15 @@ use core::{
 };
 
 use axbacktrace::Backtrace;
+use axalloc::tracking::{
+    allocations_in, current_generation, disable_tracking, enable_tracking,
+};
 use axfs_ng_vfs::{NodeFlags, VfsResult};
 
 use crate::{
     mm::clear_elf_cache,
+    pseudofs::DeviceOps,
     task::{cleanup_task_tables, tasks},
-    vfs::DeviceOps,
 };
 
 static STAMPED_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -43,10 +46,10 @@ impl MemoryCategory {
                 continue;
             };
             match name.as_ref() {
-                "starry_core::mm::ElfLoader::load" => {
+                "starry_kernel::mm::ElfLoader::load" => {
                     return Some("elf cache");
                 }
-                "starry_core::task::ProcessData::new" => {
+                "starry_kernel::task::ProcessData::new" => {
                     return Some("process data");
                 }
                 "starry_process::process::Process::new" => {
@@ -101,10 +104,10 @@ fn run_memory_analysis() {
     );
 
     let from = STAMPED_GENERATION.load(Ordering::SeqCst);
-    let to = axalloc::current_generation();
+    let to = current_generation();
 
     let mut allocations: BTreeMap<MemoryCategory, Vec<Layout>> = BTreeMap::new();
-    axalloc::allocations_in(from..to, |info| {
+    allocations_in(from..to, |info| {
         let category = MemoryCategory::new(&info.backtrace);
         allocations.entry(category).or_default().push(info.layout);
     });
@@ -142,14 +145,14 @@ impl DeviceOps for MemTrack {
         if offset == 0 && !buf.is_empty() {
             match buf {
                 b"start\n" => {
-                    let generation = axalloc::current_generation();
+                    let generation = current_generation();
                     STAMPED_GENERATION.store(generation, Ordering::SeqCst);
                     ax_println!("Memory allocation generation stamped: {}", generation);
-                    axalloc::enable_tracking();
+                    enable_tracking();
                 }
                 b"end\n" => {
                     run_memory_analysis();
-                    axalloc::disable_tracking();
+                    disable_tracking();
                 }
                 _ => {}
             }

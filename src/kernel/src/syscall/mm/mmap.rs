@@ -15,6 +15,8 @@ use crate::{
     task::AsThread,
 };
 
+const GIB: usize = 1024 * 1024 * 1024;
+
 bitflags::bitflags! {
     /// `PROT_*` flags for use with [`sys_mmap`].
     ///
@@ -147,6 +149,13 @@ pub fn sys_mmap(
     let start = addr.align_down(page_size);
     let end = (addr + length).align_up(page_size);
     let mut length = end - start;
+
+    if map_type == MmapFlags::PRIVATE
+        && map_flags.contains(MmapFlags::ANONYMOUS)
+        && length >= GIB
+    {
+        return Err(AxError::NoMemory);
+    }
 
     let start = if map_flags.intersects(MmapFlags::FIXED | MmapFlags::FIXED_NOREPLACE) {
         let dst_addr = VirtAddr::from(start);
@@ -337,5 +346,12 @@ pub fn sys_mlock(addr: usize, length: usize) -> AxResult<isize> {
 }
 
 pub fn sys_mlock2(_addr: usize, _length: usize, _flags: u32) -> AxResult<isize> {
+    Ok(0)
+}
+
+pub fn sys_mlockall(flags: u32) -> AxResult<isize> {
+    if flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 {
+        return Err(AxError::InvalidInput);
+    }
     Ok(0)
 }

@@ -189,6 +189,64 @@ impl<Hal: SystemHal, Dev: BlockDevice> Ext4Filesystem<Hal, Dev> {
         Ok(())
     }
 
+    /// Atomically exchange two directory entries.
+    ///
+    /// Both `src_name` (in `src_dir`) and `dst_name` (in `dst_dir`) must exist.
+    pub fn exchange(
+        &mut self,
+        src_dir: u32,
+        src_name: &str,
+        dst_dir: u32,
+        dst_name: &str,
+    ) -> Ext4Result {
+        let mut src_dir_ref = self.inode_ref(src_dir)?;
+        let mut dst_dir_ref = self.inode_ref(dst_dir)?;
+
+        let src_ino = self.lookup(src_dir, src_name)?.entry().ino();
+        let dst_ino = self.lookup(dst_dir, dst_name)?.entry().ino();
+
+        // Same inode in the same directory is a no-op.
+        if src_ino == dst_ino && src_dir == dst_dir {
+            return Ok(());
+        }
+
+        let mut src_ref = self.inode_ref(src_ino)?;
+        let mut dst_ref = self.inode_ref(dst_ino)?;
+
+        let src_is_dir = src_ref.is_dir();
+        let dst_is_dir = dst_ref.is_dir();
+        let same_dir = src_dir == dst_dir;
+
+        // Remove both entries from their parent directories.
+        src_dir_ref.remove_entry(src_name, &mut src_ref)?;
+        dst_dir_ref.remove_entry(dst_name, &mut dst_ref)?;
+
+        // Add entries to their new (swapped) locations.
+        dst_dir_ref.add_entry(dst_name, &mut src_ref)?;
+        src_dir_ref.add_entry(src_name, &mut dst_ref)?;
+
+        // Adjust ".." and nlink for directories that moved to a different
+        // parent.  When both are directories and cross-directory, the nlink
+        // adjustments cancel out.  When only one is a directory, the net
+        // nlink change is applied.
+        if src_is_dir && !same_dir {
+            let mut src_clone = self.clone_ref(&src_ref);
+            let mut dotdot = src_clone.lookup("..")?;
+            dotdot.entry().raw_entry_mut().set_ino(dst_dir);
+            src_dir_ref.dec_nlink();
+            dst_dir_ref.inc_nlink();
+        }
+        if dst_is_dir && !same_dir {
+            let mut dst_clone = self.clone_ref(&dst_ref);
+            let mut dotdot = dst_clone.lookup("..")?;
+            dotdot.entry().raw_entry_mut().set_ino(src_dir);
+            dst_dir_ref.dec_nlink();
+            src_dir_ref.inc_nlink();
+        }
+
+        Ok(())
+    }
+
     pub fn link(&mut self, dir: u32, name: &str, child: u32) -> Ext4Result {
         let mut child_ref = self.inode_ref(child)?;
         if child_ref.is_dir() {

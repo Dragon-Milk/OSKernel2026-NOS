@@ -7,6 +7,7 @@ use core::{
 use axerrno::AxError;
 use axpoll::{IoEvents, PollSet, Pollable};
 use axtask::future::{block_on, poll_io};
+use linux_raw_sys::general::O_RDWR;
 
 use crate::file::{FileLike, IoDst, IoSrc};
 
@@ -99,6 +100,10 @@ impl FileLike for EventFd {
     fn set_nonblocking(&self, non_blocking: bool) -> axio::Result {
         self.non_blocking.store(non_blocking, Ordering::Release);
         Ok(())
+    }
+
+    fn access_mode(&self) -> u32 {
+        O_RDWR
     }
 
     fn path(&self) -> Cow<'_, str> {

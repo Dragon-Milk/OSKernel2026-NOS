@@ -199,6 +199,7 @@ impl TimeManager {
         interval_ns: usize,
         remained_ns: usize,
     ) -> (TimeValue, TimeValue) {
+        self.last_wall_ns = monotonic_time_nanos() as usize;
         let old = mem::replace(
             &mut self.itimers[ty as usize],
             ITimer::new(interval_ns, remained_ns),
@@ -250,7 +251,9 @@ async fn alarm_task() {
                 drop(guard);
             }
             let mut guard = ALARM_LIST.lock();
-            assert!(guard.pop().is_some_and(|it| it.deadline == entry_deadline));
+            if guard.peek().is_some_and(|it| it.deadline == entry_deadline) {
+                guard.pop();
+            }
         } else {
             let deadline = entry.deadline;
             drop(guard);

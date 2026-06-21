@@ -8,7 +8,7 @@ mod fs;
 mod proc;
 mod tmp;
 
-use alloc::sync::Arc;
+use alloc::{format, sync::Arc};
 
 use axerrno::LinuxResult;
 use axfs::{FS_CONTEXT, FsContext};
@@ -81,6 +81,18 @@ pub fn mount_all() -> LinuxResult<()> {
     }
     path.push("subsystem");
     fs.symlink("whatever", &path)?;
+
+    // Minimal /sys/block for loop devices (needed by LTP statx11 setup).
+    fs.create_dir("/sys/block", DIR_PERMISSION)?;
+    for i in 0..16 {
+        let block_dev_dir = format!("/sys/block/loop{i}");
+        fs.create_dir(&block_dev_dir, DIR_PERMISSION)?;
+        let queue_dir = format!("{block_dev_dir}/queue");
+        fs.create_dir(&queue_dir, DIR_PERMISSION)?;
+        fs.write(format!("{queue_dir}/logical_block_size"), b"512\n")?;
+        fs.write(format!("{queue_dir}/dma_alignment"), b"511\n")?;
+    }
+
     drop(fs);
 
     #[cfg(feature = "dev-log")]

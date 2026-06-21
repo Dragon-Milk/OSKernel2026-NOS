@@ -13,6 +13,24 @@ use memory_addr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 
 use super::{AddrSpace, Backend, BackendOps, PopulateCallback, pages_in};
 
+static FILE_FUTEX_HANDLES: Mutex<Vec<(CachedFile, Weak<()>)>> = Mutex::new(Vec::new());
+
+fn futex_handle_for(cache: &CachedFile) -> Arc<()> {
+    let mut handles = FILE_FUTEX_HANDLES.lock();
+    handles.retain(|(_, handle)| handle.strong_count() > 0);
+    if let Some((_, handle)) = handles
+        .iter()
+        .find(|(cached, _)| cached.ptr_eq(cache))
+        && let Some(handle) = handle.upgrade()
+    {
+        return handle;
+    }
+
+    let handle = Arc::new(());
+    handles.push((cache.clone(), Arc::downgrade(&handle)));
+    handle
+}
+
 #[doc(hidden)]
 pub struct FileBackendInner {
     start: VirtAddr,
@@ -239,13 +257,14 @@ impl Backend {
         aspace: &Arc<Mutex<AddrSpace>>,
     ) -> Self {
         let offset_page = (offset / PAGE_SIZE_4K) as u32;
+        let futex_handle = futex_handle_for(&cache);
         let inner = Arc::new(FileBackendInner {
             start,
             cache,
             flags,
             offset_page,
             handle: AtomicUsize::new(0),
-            futex_handle: Arc::new(()),
+            futex_handle,
         });
         inner.register_listener(aspace);
         Self::File(FileBackend(inner))

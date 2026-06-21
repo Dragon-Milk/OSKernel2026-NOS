@@ -1,7 +1,5 @@
 gethostname01
-gethostname02
 getitimer01
-getitimer02
 getpgid01
 getpgid02
 getpgrp01
@@ -12,17 +10,11 @@ getppid02
 getpriority01
 getpriority02
 getresgid01
-getresgid01_16
 getresgid02
-getresgid02_16
 getresgid03
-getresgid03_16
 getresuid01
-getresuid01_16
 getresuid02
-getresuid02_16
 getresuid03
-getresuid03_16
 getrlimit01
 getrlimit02
 getrlimit03

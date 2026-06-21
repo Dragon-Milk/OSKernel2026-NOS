@@ -31,7 +31,7 @@ export AX_LIB := axfeat
 export APP_FEATURES := qemu
 
 ifeq ($(MEMTRACK), y)
-	APP_FEATURES += starry-api/memtrack
+	APP_FEATURES += memtrack
 endif
 
 ifeq ($(TEST_PROFILE), perf)

@@ -4,10 +4,16 @@ mod fs;
 mod net;
 mod pidfd;
 mod pipe;
+pub mod record_lock;
 pub mod signalfd;
+pub mod xattr;
 
 use alloc::{borrow::Cow, sync::Arc};
-use core::{ffi::c_int, time::Duration};
+use core::{
+    ffi::c_int,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use axerrno::{AxError, AxResult};
 use axfs::{FS_CONTEXT, OpenOptions};
@@ -17,16 +23,109 @@ use axpoll::Pollable;
 use axtask::current;
 use downcast_rs::{DowncastSync, impl_downcast};
 use flatten_objects::FlattenObjects;
-use linux_raw_sys::general::{RLIMIT_NOFILE, stat, statx, statx_timestamp};
+use linux_raw_sys::general::{O_NONBLOCK, RLIMIT_NOFILE, STATX_BASIC_STATS, stat, statx, statx_timestamp};
 use spin::RwLock;
 
 pub use self::{
-    fs::{Directory, File, resolve_at, with_fs},
+    fs::{
+        AccessMode, Directory, File, VfsCredentials,
+        check_parent_permission, check_path_len, check_path_search, check_path_search_stat,
+        check_permission, check_writable_filesystem, clear_setgid_if_not_in_group,
+        creation_metadata, resolve_at, mark_directory_deleted, is_directory_deleted, with_fs, with_fs_at,
+    },
     net::Socket,
     pidfd::PidFd,
-    pipe::Pipe,
+    pipe::{NamedPipe, Pipe, PIPE_MAX_SIZE},
+    record_lock::FileOwnerEx,
+    xattr::{
+        XATTR_CREATE, XATTR_REPLACE,
+        do_setxattr, do_getxattr, do_listxattr, do_removexattr,
+        remove_xattr_map,
+    },
 };
+// Inode-flags helpers are defined as `pub fn` / `pub const` below — no
+// separate `pub use self::` needed.
 use crate::task::{AX_FILE_LIMIT, AsThread};
+
+// ---------------------------------------------------------------------------
+// Inode flags (immutable / append-only)
+// ---------------------------------------------------------------------------
+
+use alloc::collections::BTreeMap;
+use axfs_ng_vfs::Location;
+use spin::Mutex as SpinMutex;
+
+/// FS_IOC_GETFLAGS — read inode flags.
+pub const FS_IOC_GETFLAGS: u32 = 0x80086601;
+/// FS_IOC_SETFLAGS — write inode flags.
+pub const FS_IOC_SETFLAGS: u32 = 0x40086602;
+
+/// Inode flag: immutable (cannot be modified, deleted, or renamed over).
+pub const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
+/// Inode flag: append-only (writes only allowed at end-of-file).
+pub const FS_APPEND_FL: u32 = 0x0000_0020;
+/// Inode flag: nodump (exclude from backups).
+pub const FS_NODUMP_FL: u32 = 0x0000_0040;
+
+/// Allowed settable flags.
+const SETTABLE_FLAGS: u32 = FS_IMMUTABLE_FL | FS_APPEND_FL | FS_NODUMP_FL;
+
+type InodeFlagsKey = (u64, u64);
+
+static INODE_FLAGS: SpinMutex<BTreeMap<InodeFlagsKey, u32>> = SpinMutex::new(BTreeMap::new());
+
+fn inode_flags_key(loc: &Location) -> InodeFlagsKey {
+    (loc.mountpoint().device(), loc.inode())
+}
+
+/// Read current inode flags (atomic for the same inode).
+pub fn get_inode_flags(loc: &Location) -> u32 {
+    INODE_FLAGS
+        .lock()
+        .get(&inode_flags_key(loc))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Set inode flags. `mask` controls which bits may be changed; only
+/// `SETTABLE_FLAGS` bits are applied. Returns the new flags value.
+pub fn set_inode_flags(loc: &Location, flags: u32) -> u32 {
+    let key = inode_flags_key(loc);
+    let mut table = INODE_FLAGS.lock();
+    let applied = flags & SETTABLE_FLAGS;
+    if applied == 0 {
+        table.remove(&key);
+        0
+    } else {
+        table.insert(key, applied);
+        applied
+    }
+}
+
+/// Remove inode flags tracking when the inode is truly reclaimed.
+pub fn remove_inode_flags(loc: &Location) {
+    INODE_FLAGS.lock().remove(&inode_flags_key(loc));
+}
+
+/// Check that an inode is NOT immutable. Returns `EPERM` if it is.
+pub fn check_not_immutable(loc: &Location) -> AxResult<()> {
+    if get_inode_flags(loc) & FS_IMMUTABLE_FL != 0 {
+        Err(AxError::OperationNotPermitted)
+    } else {
+        Ok(())
+    }
+}
+
+/// Check that an inode is NOT append-only. Returns `EPERM` if it is.
+/// Append-only inodes refuse setxattr, removexattr, unlink, rename,
+/// truncate, chmod, chown, and non-append writes.
+pub fn check_not_append_only(loc: &Location) -> AxResult<()> {
+    if get_inode_flags(loc) & FS_APPEND_FL != 0 {
+        Err(AxError::OperationNotPermitted)
+    } else {
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Kstat {
@@ -40,6 +139,7 @@ pub struct Kstat {
     pub blksize: u32,
     pub blocks: u64,
     pub rdev: DeviceId,
+    pub attributes: u32,
     pub atime: Duration,
     pub mtime: Duration,
     pub ctime: Duration,
@@ -58,6 +158,7 @@ impl Default for Kstat {
             blksize: 4096,
             blocks: 0,
             rdev: DeviceId::default(),
+            attributes: 0,
             atime: Duration::default(),
             mtime: Duration::default(),
             ctime: Duration::default(),
@@ -95,8 +196,11 @@ impl From<Kstat> for statx {
     fn from(value: Kstat) -> Self {
         // SAFETY: valid for statx
         let mut statx: statx = unsafe { core::mem::zeroed() };
+        statx.stx_mask = STATX_BASIC_STATS;
         statx.stx_blksize = value.blksize as _;
-        statx.stx_attributes = value.mode as _;
+        statx.stx_attributes = value.attributes as u64;
+        statx.stx_attributes_mask =
+            (FS_IMMUTABLE_FL | FS_APPEND_FL | FS_NODUMP_FL) as u64;
         statx.stx_nlink = value.nlink as _;
         statx.stx_uid = value.uid as _;
         statx.stx_gid = value.gid as _;
@@ -115,6 +219,7 @@ impl From<Kstat> for statx {
             }
         }
         statx.stx_atime = time_to_statx(&value.atime);
+        statx.stx_btime = statx_timestamp { tv_sec: 0, tv_nsec: 0, __reserved: 0 };
         statx.stx_ctime = time_to_statx(&value.ctime);
         statx.stx_mtime = time_to_statx(&value.mtime);
 
@@ -161,6 +266,18 @@ pub trait FileLike: Pollable + DowncastSync {
         Ok(())
     }
 
+    fn access_mode(&self) -> u32 {
+        0
+    }
+
+    fn status_flags(&self) -> u32 {
+        if self.nonblocking() { O_NONBLOCK } else { 0 }
+    }
+
+    fn set_status_flags(&self, flags: u32) -> AxResult {
+        self.set_nonblocking(flags & O_NONBLOCK != 0)
+    }
+
     /// Returns `false` for fd types that cannot be used with socket operations
     /// (e.g., O_PATH files, dummy fds from open_tree). In Linux these return
     /// `EBADF` rather than `ENOTSOCK` because the fd is not valid for the operation.
@@ -182,6 +299,24 @@ pub trait FileLike: Pollable + DowncastSync {
         Self: Sized + 'static,
     {
         add_file_like(Arc::new(self), cloexec)
+    }
+
+    /// Returns the globally-unique inode identity for record locking,
+    /// or `None` if this fd type does not support record locks (e.g. pipe/socket).
+    fn inode_key(&self) -> Option<record_lock::InodeKey> {
+        None
+    }
+
+    /// Returns the current file position (0 for non-seekable types).
+    fn file_position(&self) -> u64 {
+        0
+    }
+
+    /// OFD owner identity — a stable numeric id that is unique per
+    /// open-file-description.  `dup`/`fork` share the same id; independent
+    /// `open` calls get different ids.
+    fn ofd_owner(&self) -> u64 {
+        0
     }
 }
 impl_downcast!(sync FileLike);
@@ -217,6 +352,43 @@ pub fn add_file_like(f: Arc<dyn FileLike>, cloexec: bool) -> AxResult<c_int> {
     Ok(table.add(fd).map_err(|_| AxError::TooManyOpenFiles)? as c_int)
 }
 
+/// Add a file to the descriptor table at the first free fd >= `min_fd`.
+pub fn add_file_like_from(
+    f: Arc<dyn FileLike>,
+    cloexec: bool,
+    min_fd: usize,
+) -> AxResult<c_int> {
+    let max_nofile = current().as_thread().proc_data.rlim.read()[RLIMIT_NOFILE].current;
+    let mut table = FD_TABLE.write();
+    let limit = (max_nofile as usize).min(table.capacity());
+
+    if min_fd >= limit {
+        return Err(AxError::InvalidInput);
+    }
+    if table.count() as u64 >= max_nofile {
+        return Err(AxError::TooManyOpenFiles);
+    }
+
+    let fd = FileDescriptor { inner: f, cloexec };
+    for id in min_fd..limit {
+        if !table.is_assigned(id) {
+            return Ok(table
+                .add_at(id, fd)
+                .map_err(|_| AxError::TooManyOpenFiles)? as c_int);
+        }
+    }
+
+    Err(AxError::TooManyOpenFiles)
+}
+
+/// Global counter for OFD owner identity.
+/// Each independent `open()` gets a new id; `dup`/`fork` share the same id.
+static NEXT_OFD_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn alloc_ofd_id() -> u64 {
+    NEXT_OFD_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Close a file by `fd`.
 pub fn close_file_like(fd: c_int) -> AxResult {
     let f = FD_TABLE
@@ -224,6 +396,16 @@ pub fn close_file_like(fd: c_int) -> AxResult {
         .remove(fd as usize)
         .ok_or(AxError::BadFileDescriptor)?;
     debug!("close_file_like <= count: {}", Arc::strong_count(&f.inner));
+
+    // Release all POSIX record locks held by this process on the inode
+    // referenced by the closed fd.  Linux semantics: closing *any* fd
+    // referencing an inode releases all POSIX locks the process holds
+    // on that inode.
+    if let Some(key) = f.inner.inode_key() {
+        let owner = Arc::downgrade(&current().as_thread().proc_data);
+        record_lock::release_posix_locks_on_inode(key, &owner);
+    }
+
     Ok(())
 }
 
