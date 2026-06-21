@@ -238,16 +238,17 @@ pub fn sys_fallocate(
         return Err(AxError::InvalidInput);
     }
 
-    // len == 0 is a valid no-op
-    if len == 0 {
-        return Ok(0);
+    // len == 0 with FALLOC_FL_KEEP_SIZE when offset > 0 is invalid: EINVAL.
+    // When offset=0, len=0 means "from start to end-of-file" and succeeds.
+    if len == 0 && mode & FALLOC_FL_KEEP_SIZE != 0 && offset > 0 {
+        return Err(AxError::InvalidInput);
     }
 
-    // Check for overflow: offset + len must not exceed max file size
-    let end: u64 = match (offset as u64).checked_add(len as u64) {
-        Some(v) => v,
-        None => return Err(AxError::from(LinuxError::EFBIG)),
-    };
+    // Check for overflow: offset + len must not overflow off_t (i64)
+    if offset.checked_add(len).is_none() {
+        return Err(AxError::from(LinuxError::EFBIG));
+    }
+    let end = offset as u64 + len as u64;
 
     // File::from_fd returns EBADF for invalid fd, EISDIR for directory fd
     let f = File::from_fd(fd)?;
@@ -657,7 +658,10 @@ pub fn sys_splice(
             return Err(AxError::InvalidInput);
         }
         let f = get_file_like(fd_out)?;
-        f.write(&mut b"".as_slice())?;
+        // No probe write here: let do_send() handle write errors during
+        // actual data transfer. An early probe would surface ENOTCONN for
+        // unconnected sockets before we validate the pipe requirement,
+        // which violates the expected EBADF/EINVAL ordering for splice07.
         SendFile::Direct(f)
     };
 
@@ -666,4 +670,83 @@ pub fn sys_splice(
     }
 
     do_send(src, dst, len).map(|n| n as _)
+}
+
+/// Stub: validates parameters per tee(2) semantics without implementing
+/// actual data duplication between pipes.
+pub fn sys_tee(
+    fd_in: c_int,
+    fd_out: c_int,
+    _len: usize,
+    flags: u32,
+) -> AxResult<isize> {
+    debug!("sys_tee <= fd_in: {fd_in}, fd_out: {fd_out}, len: {_len}, flags: {flags:#x}");
+
+    // Only SPLICE_F_NONBLOCK is valid for tee
+    const TEE_VALID_FLAGS: u32 = 0x2; // SPLICE_F_NONBLOCK
+    if flags & !TEE_VALID_FLAGS != 0 {
+        return Err(AxError::InvalidInput);
+    }
+
+    // fd_in must be a readable pipe
+    let pipe_in = Pipe::from_fd(fd_in).map_err(|_| {
+        // Distinguish: bad fd → EBADF, not-a-pipe → EINVAL
+        if get_file_like(fd_in).is_ok() {
+            AxError::InvalidInput
+        } else {
+            AxError::BadFileDescriptor
+        }
+    })?;
+    if !pipe_in.is_read() {
+        return Err(AxError::BadFileDescriptor);
+    }
+
+    // fd_out must be a writable pipe
+    let _pipe_out = Pipe::from_fd(fd_out).map_err(|_| {
+        if get_file_like(fd_out).is_ok() {
+            AxError::InvalidInput
+        } else {
+            AxError::BadFileDescriptor
+        }
+    })?;
+
+    // Stub: no actual data movement — return success
+    Ok(0)
+}
+
+/// Stub: validates parameters per vmsplice(2) semantics without implementing
+/// actual pipe buffer filling from iovecs.
+pub fn sys_vmsplice(
+    fd: c_int,
+    iov: *const IoVec,
+    nr_segs: u32,
+    flags: u32,
+) -> AxResult<isize> {
+    debug!("sys_vmsplice <= fd: {fd}, iov: {iov:?}, nr_segs: {nr_segs}, flags: {flags:#x}");
+
+    // Valid flags for vmsplice: SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT
+    const VMSPLICE_VALID_FLAGS: u32 = 0x1 | 0x2 | 0x4 | 0x8;
+    if flags & !VMSPLICE_VALID_FLAGS != 0 {
+        return Err(AxError::InvalidInput);
+    }
+
+    // fd must be a writable pipe
+    let pipe = Pipe::from_fd(fd).map_err(|_| {
+        if get_file_like(fd).is_ok() {
+            AxError::InvalidInput
+        } else {
+            AxError::BadFileDescriptor
+        }
+    })?;
+    if !pipe.is_write() {
+        return Err(AxError::BadFileDescriptor);
+    }
+
+    // Validate iov pointer is readable
+    if nr_segs > 0 && iov.is_null() {
+        return Err(AxError::InvalidInput);
+    }
+
+    // Stub: no actual data movement — return success
+    Ok(0)
 }

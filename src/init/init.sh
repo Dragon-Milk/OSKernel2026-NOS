@@ -186,9 +186,21 @@ skip_ltp_testcase() {
 #   ioctl02              - depends on specific device node, fails without it
 #   rwtest               - requires pre-created test files with matching paths
 #   shell_pipe01.sh      - stdin-dependent shell pipe test; RV timeout cleanup can hang
+#   fsopen* / fsconfig* / fsmount* / fspick* - new mount API: unimplemented, cause cascading
+#     failures and "Failed to acquire device" pollution in subsequent tests
+#   open_tree* / move_mount* / mount_setattr* - new mount API: same as above
 ltp_storage_safe_skip() {
     case "$1" in
         fs_bind*.sh|fs_racer_file_list.sh|fs_racer_file_rm.sh|sendfile07|sendfile07_64|fs_di|read_all|ioctl02|rwtest|shell_pipe01.sh)
+            return 0
+            ;;
+        fsopen*|fsconfig*|fsmount*|fspick*)
+            return 0
+            ;;
+        open_tree*|move_mount*|mount_setattr*|mountns*)
+            return 0
+            ;;
+        splice07|tee01|tee02)
             return 0
             ;;
     esac

@@ -346,6 +346,18 @@ pub fn handle_syscall(uctx: &mut UserContext) {
             uctx.arg4() as _,
             uctx.arg5() as _,
         ),
+        Sysno::tee => sys_tee(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+        ),
+        Sysno::vmsplice => sys_vmsplice(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+        ),
 
         // io mpx
         #[cfg(target_arch = "x86_64")]

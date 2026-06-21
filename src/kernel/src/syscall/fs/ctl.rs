@@ -28,7 +28,7 @@ use crate::{
         with_fs, with_fs_at,
         FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, Socket,
     },
-    mm::vm_load_string,
+    mm::{check_access, vm_load_string},
     task::AsThread,
     time::TimeValueLike,
 };
@@ -842,6 +842,14 @@ pub fn sys_utimensat(
     }
 
     let (atime, mtime, set_to_now) = if let Some(times) = times.nullable() {
+        // Validate times pointer is in user address space: EFAULT before EBADF.
+        // Reject NULL-adjacent pointers (< 4096) which Linux would fault.
+        let ptr_addr = times.as_ptr() as usize;
+        if ptr_addr < 4096 {
+            return Err(AxError::BadAddress);
+        }
+        check_access(ptr_addr, core::mem::size_of::<[timespec; 2]>())
+            .map_err(|_| AxError::BadAddress)?;
         // FIXME: AnyBitPattern
         let [atime_spec, mtime_spec] = unsafe { times.vm_read_uninit()?.assume_init() };
         // Determine if any timestamp is set to an arbitrary (non-NOW, non-OMIT) value.
