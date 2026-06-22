@@ -29,7 +29,7 @@ use spin::RwLock;
 
 pub use self::{
     fs::{
-        AccessMode, Directory, File, VfsCredentials,
+        AccessMode, Directory, File, ResolveAtResult, VfsCredentials,
         check_parent_permission, check_path_len, check_path_search, check_path_search_stat,
         check_permission, check_writable_filesystem, clear_setgid_if_not_in_group,
         creation_metadata, resolve_at, mark_directory_deleted, is_directory_deleted, with_fs, with_fs_at,

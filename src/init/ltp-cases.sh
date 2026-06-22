@@ -18,6 +18,9 @@ ltp_batch_ids() {
         storage|storage-safe)
             echo "01 02 03 04 05 06 07 08 09 10 11 12 13 14"
             ;;
+        storage-handle-debug)
+            echo "01"
+            ;;
         *)
             return 1
             ;;
@@ -1578,6 +1581,14 @@ ltp_batch_cases() {
                 'zram02.sh' \
                 'zram03' \
                 'zram_lib.sh' \
+
+            ;;
+        storage-handle-debug:01)
+            printf '%s\n' \
+                'name_to_handle_at01' \
+                'name_to_handle_at02' \
+                'open_by_handle_at01' \
+                'open_by_handle_at02' \
 
             ;;
         common-easy:01)
