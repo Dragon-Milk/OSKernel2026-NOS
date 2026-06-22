@@ -31,9 +31,10 @@ TEST_PROFILE=${TEST_PROFILE:-ltp-batch}
 LTP_CATEGORY=${LTP_CATEGORY:-process}
 LTP_BATCH=${LTP_BATCH:-all}
 LTP_LIBC=${LTP_LIBC:-both}
+LTP_TIMEOUT=${LTP_TIMEOUT:-${LTP_CASE_TIMEOUT:-45}}
 FULL_SAFE_SKIP_WASTE=${FULL_SAFE_SKIP_WASTE:-1}
 echo "[init] TEST_PROFILE=$TEST_PROFILE"
-echo "[init] LTP_CATEGORY=$LTP_CATEGORY LTP_BATCH=$LTP_BATCH LTP_LIBC=$LTP_LIBC"
+echo "[init] LTP_CATEGORY=$LTP_CATEGORY LTP_BATCH=$LTP_BATCH LTP_LIBC=$LTP_LIBC LTP_TIMEOUT=$LTP_TIMEOUT"
 echo "[init] FULL_SAFE_SKIP_WASTE=$FULL_SAFE_SKIP_WASTE"
 
 entry_name_exists() {
@@ -57,7 +58,12 @@ ensure_named_entry() {
 }
 
 ensure_user_database() {
-    mkdir -p /etc || return
+    bb="$(busybox_cmd)"
+    if [ -n "$bb" ]; then
+        "$bb" mkdir -p /etc 2>/dev/null || return
+    else
+        mkdir -p /etc 2>/dev/null || return
+    fi
     [ -f /etc/passwd ] || : > /etc/passwd
     [ -f /etc/group ] || : > /etc/group
 
@@ -67,8 +73,6 @@ ensure_user_database() {
     ensure_named_entry /etc/group daemon 'daemon:x:1:'
     ensure_named_entry /etc/group nobody 'nobody:x:65534:'
 }
-
-ensure_user_database
 
 run_with_shell() {
     script="$1"
@@ -97,6 +101,8 @@ busybox_cmd() {
         echo /glibc/busybox
     fi
 }
+
+ensure_user_database
 
 is_leftover_command() {
     case "$1" in
@@ -167,6 +173,26 @@ skip_ltp_testcase() {
     echo "#### OS COMP TEST GROUP START $group ####"
     echo "#### OS COMP TEST GROUP END $group ####"
     return 0
+}
+
+# Returns 0 (true) if the given case name should be skipped in storage-safe mode.
+# Known blockers:
+#   fs_bind*.sh          - bind/mount propagation shell suite; LA can hang in timeout cleanup
+#   fs_racer_file_rm.sh  - triggers kernel panic (mutex double-acquire in proc/symlink/statx path)
+#   fs_racer_file_list.sh - storage racer stress case can hang the batch
+#   sendfile07 / sendfile07_64 - causes cascading memory allocation failures
+#   fs_di                - requires specific device arguments, not suitable for bare-metal
+#   read_all             - reads /dev/* and /proc/* blindly, causes noise on bare-metal
+#   ioctl02              - depends on specific device node, fails without it
+#   rwtest               - requires pre-created test files with matching paths
+#   shell_pipe01.sh      - stdin-dependent shell pipe test; RV timeout cleanup can hang
+ltp_storage_safe_skip() {
+    case "$1" in
+        fs_bind*.sh|fs_racer_file_list.sh|fs_racer_file_rm.sh|sendfile07|sendfile07_64|fs_di|read_all|ioctl02|rwtest|shell_pipe01.sh)
+            return 0
+            ;;
+    esac
+    return 1
 }
 
 # Check whether an LTP case should be skipped for a given libc.
@@ -357,6 +383,33 @@ prepare_stable_test_env() {
     fi
 }
 
+# Ensure common commands (cp, mkdir, rm, sleep, zcat, etc.) are reachable
+# via PATH so LTP shell scripts and test binaries don't fail with "not found".
+# Uses the first available busybox, preferring the glibc build when present.
+prepare_storage_commands() {
+    bb="$(busybox_cmd)"
+    [ -n "$bb" ] || return
+    case "$bb" in
+        ./*) bb="$(pwd)/${bb#./}" ;;
+    esac
+
+    "$bb" mkdir -p /bin 2>/dev/null || true
+
+    for cmd in \
+        sh cp mkdir rm sleep zcat \
+        gzip gunzip tar mv ln ls cat \
+        wc du df touch chmod chown \
+        echo grep basename dirname dd \
+        stat find mknod mount umount \
+        awk sed sort head tail tr cut expr pwd \
+        mktemp seq id
+    do
+        if [ -x "$bb" ] && ! [ -x "/bin/$cmd" ]; then
+            "$bb" ln -sf "$bb" "/bin/$cmd" 2>/dev/null || true
+        fi
+    done
+}
+
 run_stable_tests() {
     for testcase in \
         /glibc/basic_testcode.sh \
@@ -541,13 +594,22 @@ run_ltp_one_batch_libc() {
     export LTPROOT="$dir/ltp"
     export LTP_DATAROOT="$dir/ltp/testcases/bin"
     export PATH="$dir/ltp/testcases/bin:$PATH"
-    mkdir -p /dev/shm
+    bb="$(busybox_cmd)"
+    case_timeout="$LTP_TIMEOUT"
+
+    if [ "$LTP_CATEGORY" = "storage-safe" ]; then
+        prepare_storage_commands
+    fi
+
+    if [ -n "$bb" ]; then
+        "$bb" mkdir -p /dev/shm 2>/dev/null || true
+    else
+        mkdir -p /dev/shm 2>/dev/null || true
+    fi
     export LTP_IPC_PATH="/dev/shm/ltp_ipc_path"
     : > "$LTP_IPC_PATH"
-    bb="$(busybox_cmd)"
-    case_timeout="${LTP_CASE_TIMEOUT:-45}"
 
-    ltp_batch_cases "$LTP_CATEGORY" "$batch" | while read name; do
+    ltp_batch_cases "$LTP_CATEGORY" "$batch" | while IFS= read -r name; do
         [ -n "$name" ] || continue
         file="ltp/testcases/bin/$name"
 
@@ -558,6 +620,11 @@ run_ltp_one_batch_libc() {
 
         if ltp_skip_case "$name" "$libc"; then
             echo "SKIP LTP CASE $name : $LTP_SKIP_REASON"
+            continue
+        fi
+
+        if [ "$LTP_CATEGORY" = "storage-safe" ] && ltp_storage_safe_skip "$name"; then
+            echo "[LTP-STORAGE-SAFE-SKIP] $libc $name"
             continue
         fi
 
@@ -590,9 +657,9 @@ run_ltp_one_batch_libc() {
         echo "RUN LTP CASE $name"
 
         if [ -n "$bb" ]; then
-            "$bb" timeout "$case_timeout" "$file"
+            "$bb" timeout "$case_timeout" "$file" < /dev/null
         else
-            "$file"
+            "$file" < /dev/null
         fi
         ret=$?
         echo "FAIL LTP CASE $name : $ret"
@@ -634,7 +701,7 @@ run_ltp_batch_tests() {
     found=1
 
     case "$LTP_CATEGORY" in
-        process|fs|mm-ipc|common-easy|storage) ;;
+        process|fs|mm-ipc|common-easy|storage|storage-safe) ;;
         *)
             echo "[LTP-BATCH-ERROR] unsupported category: $LTP_CATEGORY"
             return

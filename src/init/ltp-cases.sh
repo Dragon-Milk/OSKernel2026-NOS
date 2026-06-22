@@ -15,7 +15,7 @@ ltp_batch_ids() {
         common-easy)
             echo "01"
             ;;
-        storage)
+        storage|storage-safe)
             echo "01 02 03 04 05 06 07 08 09 10 11 12 13 14"
             ;;
         *)
@@ -27,6 +27,10 @@ ltp_batch_ids() {
 ltp_batch_cases() {
     category="$1"
     batch="$2"
+
+    # Map storage-safe to storage for case-list lookup;
+    # dangerous-case skipping is handled at runtime in init.sh.
+    [ "$category" = "storage-safe" ] && category="storage"
 
     case "$category:$batch" in
         process:01)
