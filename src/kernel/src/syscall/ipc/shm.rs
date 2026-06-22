@@ -149,7 +149,7 @@ impl ShmInner {
 
     /// Called by sys_shmat
     pub fn attach_process(&mut self, pid: Pid, va_range: VirtAddrRange) {
-        assert!(self.get_addr_range(pid).is_none());
+        // Allow re-attach: overwrite previous range if exists
         self.va_range.insert(pid, va_range);
         self.shmid_ds.shm_nattch += 1;
         self.shmid_ds.shm_lpid = pid as __kernel_pid_t;
@@ -158,11 +158,11 @@ impl ShmInner {
 
     /// Called by sys_shmdt
     pub fn detach_process(&mut self, pid: Pid) {
-        assert!(self.get_addr_range(pid).is_some());
-        self.va_range.remove(&pid);
-        self.shmid_ds.shm_nattch -= 1;
-        self.shmid_ds.shm_lpid = pid as __kernel_pid_t;
-        self.shmid_ds.shm_dtime = monotonic_time_nanos() as __kernel_time_t;
+        if self.va_range.remove(&pid).is_some() {
+            self.shmid_ds.shm_nattch -= 1;
+            self.shmid_ds.shm_lpid = pid as __kernel_pid_t;
+            self.shmid_ds.shm_dtime = monotonic_time_nanos() as __kernel_time_t;
+        }
     }
 }
 
@@ -441,7 +441,9 @@ pub fn sys_shmat(shmid: i32, addr: usize, shmflg: u32) -> AxResult<isize> {
     let length = shm_inner.page_num * PAGE_SIZE_4K;
 
     // alloc the virtual address range
-    assert!(shm_inner.get_addr_range(pid).is_none());
+    if shm_inner.get_addr_range(pid).is_some() {
+        return Err(AxError::AlreadyExists);
+    }
     let start_addr = aspace
         .find_free_area(
             VirtAddr::from(start_aligned),

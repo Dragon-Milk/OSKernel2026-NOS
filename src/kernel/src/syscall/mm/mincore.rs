@@ -14,7 +14,10 @@ use axtask::current;
 use memory_addr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use starry_vm::vm_write_slice;
 
-use crate::task::AsThread;
+use crate::{
+    config::{USER_SPACE_BASE, USER_SPACE_SIZE},
+    task::AsThread,
+};
 
 /// Check whether pages are resident in memory.
 ///
@@ -66,50 +69,59 @@ pub fn sys_mincore(addr: usize, length: usize, vec: *mut u8) -> AxResult<isize> 
         return Ok(0);
     }
 
+    let user_space_end = USER_SPACE_BASE + USER_SPACE_SIZE;
+    if addr < USER_SPACE_BASE || addr >= user_space_end || length > user_space_end - addr {
+        return Err(AxError::NoMemory);
+    }
+
     // Calculate number of pages to check
     let page_count = length.div_ceil(PAGE_SIZE_4K);
 
-    // Get current address space
-    let curr = current();
-    let aspace = curr.as_thread().proc_data.aspace.lock();
+    let result = {
+        // Get current address space
+        let curr = current();
+        let aspace = curr.as_thread().proc_data.aspace.lock();
 
-    let mut result = vec![0u8; page_count];
-    let mut i = 0;
+        let mut result = vec![0u8; page_count];
+        let mut i = 0;
 
-    while i < page_count {
-        let addr = start_addr + i * PAGE_SIZE_4K;
+        while i < page_count {
+            let addr = start_addr + i * PAGE_SIZE_4K;
 
-        // ENOMEM: Check if this page is within a valid VMA
-        let area = aspace.find_area(addr).ok_or(AxError::NoMemory)?;
+            // ENOMEM: Check if this page is within a valid VMA
+            let area = aspace.find_area(addr).ok_or(AxError::NoMemory)?;
 
-        // Verify we have at least USER access permission
-        if !area.flags().contains(MappingFlags::USER) {
-            return Err(AxError::NoMemory);
+            // Verify we have at least USER access permission
+            if !area.flags().contains(MappingFlags::USER) {
+                return Err(AxError::NoMemory);
+            }
+
+            // Query page table with batch awareness
+            let (is_resident, size) = match aspace.page_table().query(addr) {
+                Ok((_, _, size)) => {
+                    // Physical page exists and is resident
+                    // page_size tells us how many contiguous pages have the same status
+                    (true, size as _)
+                }
+                Err(_) => {
+                    // Page is mapped but not populated (lazy allocation)
+                    // We need to determine how many contiguous pages are also not populated
+                    // For safety, we check the next page or use PAGE_SIZE_4K as minimum step
+                    (false, PAGE_SIZE_4K)
+                }
+            };
+            let n = size / PAGE_SIZE_4K;
+
+            if is_resident {
+                let end = (i + n).min(page_count);
+                result[i..end].fill(1);
+            }
+
+            i += n;
         }
 
-        // Query page table with batch awareness
-        let (is_resident, size) = match aspace.page_table().query(addr) {
-            Ok((_, _, size)) => {
-                // Physical page exists and is resident
-                // page_size tells us how many contiguous pages have the same status
-                (true, size as _)
-            }
-            Err(_) => {
-                // Page is mapped but not populated (lazy allocation)
-                // We need to determine how many contiguous pages are also not populated
-                // For safety, we check the next page or use PAGE_SIZE_4K as minimum step
-                (false, PAGE_SIZE_4K)
-            }
-        };
-        let n = size / PAGE_SIZE_4K;
-
-        if is_resident {
-            let end = (i + n).min(page_count);
-            result[i..end].fill(1);
-        }
-
-        i += n;
-    }
+        result
+    };
 
     // EFAULT: Write result to user space
     // vm_write_slice will return EFAULT if vec is invalid

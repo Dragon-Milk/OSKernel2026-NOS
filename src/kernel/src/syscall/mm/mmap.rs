@@ -15,8 +15,6 @@ use crate::{
     task::AsThread,
 };
 
-const GIB: usize = 1024 * 1024 * 1024;
-
 bitflags::bitflags! {
     /// `PROT_*` flags for use with [`sys_mmap`].
     ///
@@ -43,7 +41,7 @@ impl From<MmapProt> for MappingFlags {
             flags |= MappingFlags::READ;
         }
         if value.contains(MmapProt::WRITE) {
-            flags |= MappingFlags::WRITE;
+            flags |= MappingFlags::READ | MappingFlags::WRITE;
         }
         if value.contains(MmapProt::EXEC) {
             flags |= MappingFlags::EXECUTE;
@@ -149,13 +147,6 @@ pub fn sys_mmap(
     let start = addr.align_down(page_size);
     let end = (addr + length).align_up(page_size);
     let mut length = end - start;
-
-    if map_type == MmapFlags::PRIVATE
-        && map_flags.contains(MmapFlags::ANONYMOUS)
-        && length >= GIB
-    {
-        return Err(AxError::NoMemory);
-    }
 
     let start = if map_flags.intersects(MmapFlags::FIXED | MmapFlags::FIXED_NOREPLACE) {
         let dst_addr = VirtAddr::from(start);
@@ -292,42 +283,98 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: u32) -> AxResult<isize> {
     Ok(0)
 }
 
-pub fn sys_mremap(addr: usize, old_size: usize, new_size: usize, flags: u32) -> AxResult<isize> {
+pub fn sys_mremap(
+    addr: usize,
+    old_size: usize,
+    new_size: usize,
+    flags: u32,
+    new_addr: usize,
+) -> AxResult<isize> {
     debug!(
         "sys_mremap <= addr: {addr:#x}, old_size: {old_size:x}, new_size: {new_size:x}, flags: \
-         {flags:#x}"
+         {flags:#x}, new_addr: {new_addr:#x}"
     );
 
-    // TODO: full implementation
+    const MREMAP_KNOWN_FLAGS: u32 = MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP;
 
-    if !addr.is_multiple_of(PageSize::Size4K as usize) {
+    if flags & !MREMAP_KNOWN_FLAGS != 0
+        || flags & MREMAP_DONTUNMAP != 0
+        || !addr.is_multiple_of(PageSize::Size4K as usize)
+    {
         return Err(AxError::InvalidInput);
     }
-    let addr = VirtAddr::from(addr);
+    if flags & MREMAP_FIXED != 0 {
+        if flags & MREMAP_MAYMOVE == 0 || !new_addr.is_multiple_of(PageSize::Size4K as usize) {
+            return Err(AxError::InvalidInput);
+        }
+        let old_end = addr.checked_add(old_size).ok_or(AxError::InvalidInput)?;
+        let new_end = new_addr.checked_add(new_size).ok_or(AxError::InvalidInput)?;
+        if addr < new_end && new_addr < old_end {
+            return Err(AxError::InvalidInput);
+        }
+    }
 
-    let curr = current();
-    let aspace = curr.as_thread().proc_data.aspace.lock();
     let old_size = align_up_4k(old_size);
     let new_size = align_up_4k(new_size);
+    if old_size == 0 || new_size == 0 {
+        return Err(AxError::InvalidInput);
+    }
 
-    let flags = aspace.find_area(addr).ok_or(AxError::NoMemory)?.flags();
+    let old_addr = VirtAddr::from(addr);
+    let curr = current();
+    let aspace = curr.as_thread().proc_data.aspace.lock();
+    let mut cursor = old_addr;
+    let old_end = old_addr + old_size;
+    let mut prot = MmapProt::empty();
+    while cursor < old_end {
+        let area = aspace.find_area(cursor).ok_or(AxError::BadAddress)?;
+        let area_flags = area.flags();
+        if area_flags.contains(MappingFlags::READ) {
+            prot |= MmapProt::READ;
+        }
+        if area_flags.contains(MappingFlags::WRITE) {
+            prot |= MmapProt::WRITE;
+        }
+        if area_flags.contains(MappingFlags::EXECUTE) {
+            prot |= MmapProt::EXEC;
+        }
+        cursor = area.end().min(old_end);
+    }
     drop(aspace);
-    let new_addr = sys_mmap(
-        addr.as_usize(),
-        new_size,
-        flags.bits() as _,
-        MmapFlags::PRIVATE.bits(),
-        -1,
-        0,
-    )? as usize;
+
+    if new_size <= old_size && flags & MREMAP_FIXED == 0 {
+        if new_size < old_size {
+            sys_munmap(addr + new_size, old_size - new_size)?;
+        }
+        return Ok(addr as isize);
+    }
+
+    if flags & MREMAP_MAYMOVE == 0 {
+        return Err(AxError::NoMemory);
+    }
+
+    let target = if flags & MREMAP_FIXED != 0 {
+        new_addr
+    } else {
+        addr
+    };
+    let mmap_flags = MmapFlags::PRIVATE.bits()
+        | MmapFlags::ANONYMOUS.bits()
+        | if flags & MREMAP_FIXED != 0 {
+            MmapFlags::FIXED.bits()
+        } else {
+            0
+        };
+    let mapped_addr = sys_mmap(target, new_size, prot.bits(), mmap_flags, -1, 0)? as usize;
 
     let copy_len = new_size.min(old_size);
-    let data = vm_load(addr.as_ptr(), copy_len)?;
-    vm_write_slice(new_addr as *mut u8, &data)?;
+    if let Ok(data) = vm_load(addr as *const u8, copy_len) {
+        vm_write_slice(mapped_addr as *mut u8, &data)?;
+    }
 
-    sys_munmap(addr.as_usize(), old_size)?;
+    sys_munmap(addr, old_size)?;
 
-    Ok(new_addr as isize)
+    Ok(mapped_addr as isize)
 }
 
 pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> AxResult<isize> {
@@ -338,6 +385,32 @@ pub fn sys_madvise(addr: usize, length: usize, advice: i32) -> AxResult<isize> {
 pub fn sys_msync(addr: usize, length: usize, flags: u32) -> AxResult<isize> {
     debug!("sys_msync <= addr: {addr:#x}, length: {length:x}, flags: {flags:#x}");
 
+    let valid_flags = MS_ASYNC | MS_INVALIDATE | MS_SYNC;
+    if flags & !valid_flags != 0 || flags & MS_ASYNC != 0 && flags & MS_SYNC != 0 {
+        return Err(AxError::InvalidInput);
+    }
+    if !addr.is_multiple_of(PageSize::Size4K as usize) {
+        return Err(AxError::InvalidInput);
+    }
+    if length == 0 {
+        return Ok(0);
+    }
+
+    let start = VirtAddr::from(addr);
+    let length = align_up_4k(length);
+    let end = start + length;
+    let curr = current();
+    let aspace = curr.as_thread().proc_data.aspace.lock();
+    let mut cursor = start;
+    while cursor < end {
+        let area = aspace.find_area(cursor).ok_or(AxError::NoMemory)?;
+        cursor = area.end().min(end);
+    }
+
+    if flags & MS_INVALIDATE != 0 {
+        return Err(AxError::ResourceBusy);
+    }
+
     Ok(0)
 }
 
@@ -345,7 +418,48 @@ pub fn sys_mlock(addr: usize, length: usize) -> AxResult<isize> {
     sys_mlock2(addr, length, 0)
 }
 
-pub fn sys_mlock2(_addr: usize, _length: usize, _flags: u32) -> AxResult<isize> {
+pub fn sys_mlock2(addr: usize, length: usize, flags: u32) -> AxResult<isize> {
+    if flags & !MLOCK_ONFAULT != 0 {
+        return Err(AxError::InvalidInput);
+    }
+    if length == 0 || flags & MLOCK_ONFAULT != 0 {
+        return Ok(0);
+    }
+
+    let page_size = PageSize::Size4K as usize;
+    let start = addr.align_down(page_size);
+    let end = addr
+        .checked_add(length)
+        .ok_or(AxError::NoMemory)?
+        .align_up(page_size);
+
+    let curr = current();
+    let mut aspace = curr.as_thread().proc_data.aspace.lock();
+
+    let mut page = start;
+    while page < end {
+        let vaddr = VirtAddr::from(page);
+        let area_flags = aspace.find_area(vaddr).ok_or(AxError::NoMemory)?.flags();
+        let access_flags = if area_flags.contains(MappingFlags::READ) {
+            MappingFlags::READ
+        } else if area_flags.contains(MappingFlags::WRITE) {
+            MappingFlags::WRITE
+        } else if area_flags.contains(MappingFlags::EXECUTE) {
+            MappingFlags::EXECUTE
+        } else {
+            MappingFlags::empty()
+        };
+
+        if !aspace.handle_page_fault(vaddr, access_flags) {
+            return Err(AxError::NoMemory);
+        }
+        page += page_size;
+    }
+
+    Ok(0)
+}
+
+pub fn sys_munlock(_addr: usize, _length: usize) -> AxResult<isize> {
     Ok(0)
 }
 
@@ -353,5 +467,9 @@ pub fn sys_mlockall(flags: u32) -> AxResult<isize> {
     if flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 {
         return Err(AxError::InvalidInput);
     }
+    Ok(0)
+}
+
+pub fn sys_munlockall() -> AxResult<isize> {
     Ok(0)
 }
