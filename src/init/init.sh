@@ -32,6 +32,7 @@ LTP_CATEGORY=${LTP_CATEGORY:-process}
 LTP_BATCH=${LTP_BATCH:-all}
 LTP_LIBC=${LTP_LIBC:-both}
 LTP_TIMEOUT=${LTP_TIMEOUT:-${LTP_CASE_TIMEOUT:-45}}
+export LTP_TIMEOUT
 FULL_SAFE_SKIP_WASTE=${FULL_SAFE_SKIP_WASTE:-1}
 echo "[init] TEST_PROFILE=$TEST_PROFILE"
 echo "[init] LTP_CATEGORY=$LTP_CATEGORY LTP_BATCH=$LTP_BATCH LTP_LIBC=$LTP_LIBC LTP_TIMEOUT=$LTP_TIMEOUT"
@@ -414,7 +415,8 @@ prepare_storage_commands() {
         echo grep basename dirname dd \
         stat find mknod mount umount \
         awk sed sort head tail tr cut expr pwd \
-        mktemp seq id
+        mktemp seq id diff md5sum \
+        cmp sha256sum xargs uniq env
     do
         if [ -x "$bb" ] && ! [ -x "/bin/$cmd" ]; then
             "$bb" ln -sf "$bb" "/bin/$cmd" 2>/dev/null || true
@@ -607,7 +609,7 @@ run_ltp_one_batch_libc() {
     export LTP_DATAROOT="$dir/ltp/testcases/bin"
     export PATH="$dir/ltp/testcases/bin:$PATH"
     bb="$(busybox_cmd)"
-    case_timeout="$LTP_TIMEOUT"
+    case_timeout="${LTP_TIMEOUT:-1}"
 
     if [ "$LTP_CATEGORY" = "storage-safe" ]; then
         prepare_storage_commands
@@ -620,6 +622,12 @@ run_ltp_one_batch_libc() {
     fi
     export LTP_IPC_PATH="/dev/shm/ltp_ipc_path"
     : > "$LTP_IPC_PATH"
+
+    # LA busybox timeout does not pass env to child; use a temp wrapper.
+    if [ -n "$bb" ] && [ -n "$case_timeout" ]; then
+        "$bb" printf '#!/bin/sh\nexport LTP_TIMEOUT=%s\nexec "$@"\n' "$case_timeout" > /tmp/ltpw
+        "$bb" chmod +x /tmp/ltpw 2>/dev/null || true
+    fi
 
     ltp_batch_cases "$LTP_CATEGORY" "$batch" | while IFS= read -r name; do
         [ -n "$name" ] || continue
@@ -669,9 +677,9 @@ run_ltp_one_batch_libc() {
         echo "RUN LTP CASE $name"
 
         if [ -n "$bb" ]; then
-            "$bb" timeout "$case_timeout" "$file" < /dev/null
+            "$bb" timeout "$case_timeout" /tmp/ltpw "$file" < /dev/null
         else
-            "$file" < /dev/null
+            LTP_TIMEOUT="$case_timeout" "$file" < /dev/null
         fi
         ret=$?
         echo "FAIL LTP CASE $name : $ret"
@@ -776,7 +784,13 @@ run_ltp_safe_libc() {
     : > "$LTP_IPC_PATH"
 
     bb="$(busybox_cmd)"
-    case_timeout="${LTP_CASE_TIMEOUT:-45}"
+    case_timeout="${LTP_CASE_TIMEOUT:-${LTP_TIMEOUT:-1}}"
+
+    # LA busybox timeout does not pass env to child; use a temp wrapper.
+    if [ -n "$bb" ] && [ -n "$case_timeout" ]; then
+        "$bb" printf '#!/bin/sh\nexport LTP_TIMEOUT=%s\nexec "$@"\n' "$case_timeout" > /tmp/ltpw
+        "$bb" chmod +x /tmp/ltpw 2>/dev/null || true
+    fi
 
     group="ltp-$libc"
     echo "#### OS COMP TEST GROUP START $group ####"
@@ -824,9 +838,9 @@ run_ltp_safe_libc() {
         echo "RUN LTP CASE $name"
 
         if [ -n "$bb" ]; then
-            "$bb" timeout "$case_timeout" "$file"
+            "$bb" timeout "$case_timeout" /tmp/ltpw "$file"
         else
-            "$file"
+            LTP_TIMEOUT="$case_timeout" "$file"
         fi
         ret=$?
         echo "FAIL LTP CASE $name : $ret"
