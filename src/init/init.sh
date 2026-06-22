@@ -19,19 +19,22 @@ export PATH=$BASE_PATH
 # ltp-only      : run glibc and musl ltp only
 # ltp-list      : list glibc and musl ltp testcase names only
 # ltp-batch     : run one or all embedded phase1 LTP category batches (LTP_BATCH=all|01|02...)
+# ltp-safe      : run LTP safe whitelist from ltp-safe.txt (~675 cases)
 # perf          : run stable profile with kernel-side perf summary when built with perf-profile
 # unixbench     : run glibc and musl unixbench only
 # wait-repro    : run wait/libctest/lmbench/unixbench repro
-# full          : scan and run all testcode scripts
-# full-safe     : run all non-LTP testcode scripts plus LTP safe whitelist from ltp-safe.txt
+# full          : scan and run all testcode scripts (original full scan, no LTP skip)
+# full-safe     : prepare basic scripts, run non-LTP tests (skip waste if enabled), then LTP safe whitelist
 # ============================================================
 SKIP_LTP=${SKIP_LTP:-0}
 TEST_PROFILE=${TEST_PROFILE:-ltp-batch}
 LTP_CATEGORY=${LTP_CATEGORY:-process}
 LTP_BATCH=${LTP_BATCH:-all}
 LTP_LIBC=${LTP_LIBC:-both}
+FULL_SAFE_SKIP_WASTE=${FULL_SAFE_SKIP_WASTE:-1}
 echo "[init] TEST_PROFILE=$TEST_PROFILE"
 echo "[init] LTP_CATEGORY=$LTP_CATEGORY LTP_BATCH=$LTP_BATCH LTP_LIBC=$LTP_LIBC"
+echo "[init] FULL_SAFE_SKIP_WASTE=$FULL_SAFE_SKIP_WASTE"
 
 entry_name_exists() {
     file="$1"
@@ -302,15 +305,12 @@ prepare_basic_scripts() {
     done
 }
 
-prepare_cyclictest_env() {
-    bb="$(busybox_cmd)"
-    [ -n "$bb" ] || return
-    echo "[init] prepare cyclictest env: ensuring /tmp /var/tmp exist"
-    "$bb" mkdir -p /tmp /var/tmp 2>/dev/null || true
-}
-
-run_all_non_ltp_testcode_tests() {
-    # Scan / /glibc /musl for *_testcode.sh, skip ltp_testcode.sh and test_all.sh.
+# full-safe 专用的非 LTP 扫描函数。
+# 当 FULL_SAFE_SKIP_WASTE=1（默认）时，跳过三个低收益/高耗时脚本：
+#   /glibc/unixbench_testcode.sh  (unixbench-glibc)
+#   /musl/unixbench_testcode.sh   (unixbench-musl)
+#   /glibc/libctest_testcode.sh   (glibc-libctest)
+run_full_safe_non_ltp_tests() {
     for dir in / /glibc /musl; do
         [ -d "$dir" ] || continue
         for testcase in "$dir"/*_testcode.sh; do
@@ -323,67 +323,22 @@ run_all_non_ltp_testcode_tests() {
                     ;;
             esac
 
-            run_test_path "$testcase"
-        done
-    done
-}
-
-run_short_before_ltp_tests() {
-    run_test_path /glibc/basic_testcode.sh
-    run_test_path /glibc/busybox_testcode.sh
-    run_test_path /glibc/cyclictest_testcode.sh
-
-    run_test_path /musl/basic_testcode.sh
-    run_test_path /musl/busybox_testcode.sh
-    run_test_path /musl/cyclictest_testcode.sh
-}
-
-run_remaining_non_ltp_after_ltp_tests() {
-    for dir in / /glibc /musl; do
-        [ -d "$dir" ] || continue
-        for testcase in "$dir"/*_testcode.sh; do
-            [ -f "$testcase" ] || continue
-
-            name="${testcase##*/}"
-            case "$name" in
-                ltp_testcode.sh|ltp_all_testcode.sh)
-                    continue
-                    ;;
-            esac
-
-            case "$testcase" in
-                /glibc/basic_testcode.sh|/glibc/busybox_testcode.sh|/glibc/cyclictest_testcode.sh|\
-                /musl/basic_testcode.sh|/musl/busybox_testcode.sh|/musl/cyclictest_testcode.sh)
-                    continue
-                    ;;
-            esac
-
-            run_test_path "$testcase"
-        done
-    done
-}
-
-run_remaining_scored_non_ltp_after_ltp_tests() {
-    for dir in / /glibc /musl; do
-        [ -d "$dir" ] || continue
-        for testcase in "$dir"/*_testcode.sh; do
-            [ -f "$testcase" ] || continue
-
-            name="${testcase##*/}"
-            case "$name" in
-                ltp_testcode.sh|ltp_all_testcode.sh)
-                    continue
-                    ;;
-            esac
-
-            case "$testcase" in
-                /glibc/basic_testcode.sh|/glibc/busybox_testcode.sh|/glibc/cyclictest_testcode.sh|\
-                /musl/basic_testcode.sh|/musl/busybox_testcode.sh|/musl/cyclictest_testcode.sh|\
-                /glibc/unixbench_testcode.sh|/musl/unixbench_testcode.sh|\
-                /glibc/libctest_testcode.sh)
-                    continue
-                    ;;
-            esac
+            if [ "$FULL_SAFE_SKIP_WASTE" = "1" ]; then
+                case "$testcase" in
+                    /glibc/unixbench_testcode.sh)
+                        echo "[full-safe] skip /glibc/unixbench_testcode.sh because FULL_SAFE_SKIP_WASTE=1"
+                        continue
+                        ;;
+                    /musl/unixbench_testcode.sh)
+                        echo "[full-safe] skip /musl/unixbench_testcode.sh because FULL_SAFE_SKIP_WASTE=1"
+                        continue
+                        ;;
+                    /glibc/libctest_testcode.sh)
+                        echo "[full-safe] skip /glibc/libctest_testcode.sh because FULL_SAFE_SKIP_WASTE=1"
+                        continue
+                        ;;
+                esac
+            fi
 
             run_test_path "$testcase"
         done
@@ -744,6 +699,37 @@ run_ltp_safe_libc() {
             continue
         fi
 
+        if ltp_skip_case "$name" "$libc"; then
+            echo "SKIP LTP CASE $name : $LTP_SKIP_REASON"
+            continue
+        fi
+
+        if [ "$name" = "epoll-ltp" ]; then
+            echo "RUN LTP CASE $name"
+            if [ -n "$bb" ]; then
+                "$bb" timeout 150 "$file"
+            else
+                "$file"
+            fi
+            ret=$?
+            echo "FAIL LTP CASE $name : $ret"
+            # epoll-ltp spawns children (epoll01 etc.) that survive
+            # timeout/termination and pollute subsequent cases with
+            # interleaved output and resource contention.
+            if [ -n "$bb" ]; then
+                "$bb" ps | while read pid user time cmd; do
+                    case "$pid" in ''|PID) continue ;; esac
+                    [ "$pid" = "$$" ] && continue
+                    case "$cmd" in
+                        *epoll*)
+                            "$bb" kill -KILL "$pid" 2>/dev/null || true
+                            ;;
+                    esac
+                done
+            fi
+            continue
+        fi
+
         echo "RUN LTP CASE $name"
 
         if [ -n "$bb" ]; then
@@ -892,22 +878,8 @@ case "$TEST_PROFILE" in
         ;;
     full-safe)
         prepare_basic_scripts
-        run_all_non_ltp_testcode_tests
+        run_full_safe_non_ltp_tests
         run_ltp_safe_tests
-        ;;
-    full-safe-short-before-ltp)
-        prepare_basic_scripts
-        prepare_cyclictest_env
-        run_short_before_ltp_tests
-        run_ltp_safe_tests
-        run_remaining_non_ltp_after_ltp_tests
-        ;;
-    full-safe-short-before-ltp-skip-waste)
-        prepare_basic_scripts
-        prepare_cyclictest_env
-        run_short_before_ltp_tests
-        run_ltp_safe_tests
-        run_remaining_scored_non_ltp_after_ltp_tests
         ;;
     *)
         echo "Unknown TEST_PROFILE=$TEST_PROFILE; using stable profile."

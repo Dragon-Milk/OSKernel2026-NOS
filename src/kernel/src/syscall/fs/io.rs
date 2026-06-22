@@ -19,8 +19,9 @@ use syscalls::Sysno;
 use crate::{
     file::{
         AccessMode, Directory, File, FileLike, NamedPipe, Pipe, Socket, VfsCredentials,
+        FS_APPEND_FL, FS_IMMUTABLE_FL,
         check_not_append_only, check_not_immutable,
-        check_permission, check_writable_filesystem, get_file_like,
+        check_permission, check_writable_filesystem, get_file_like, get_inode_flags,
     },
     mm::{IoVec, IoVectorBuf, UserConstPtr, VmBytes, VmBytesMut},
     task::AsThread,
@@ -72,10 +73,12 @@ pub fn sys_readv(fd: i32, iov: *const IoVec, iovcnt: usize) -> AxResult<isize> {
 pub fn sys_write(fd: i32, buf: *mut u8, len: usize) -> AxResult<isize> {
     debug!("sys_write <= fd: {fd}, buf: {buf:p}, len: {len}");
     let f = get_file_like(fd)?;
-    // Check immutable for regular files before writing.
+    // Combined immutable/append-only check — single INODE_FLAGS lookup.
     if let Some(file) = f.downcast_ref::<File>() {
-        check_not_immutable(file.inner().location())?;
-        check_not_append_only(file.inner().location())?;
+        let flags = get_inode_flags(file.inner().location());
+        if flags & (FS_IMMUTABLE_FL | FS_APPEND_FL) != 0 {
+            return Err(AxError::OperationNotPermitted);
+        }
     }
     let written = f.write(&mut VmBytes::new(buf, len))?;
     crate::perf::perf_observe_user_write(fd, buf, written);
@@ -85,10 +88,12 @@ pub fn sys_write(fd: i32, buf: *mut u8, len: usize) -> AxResult<isize> {
 pub fn sys_writev(fd: i32, iov: *const IoVec, iovcnt: usize) -> AxResult<isize> {
     debug!("sys_writev <= fd: {fd}, iovcnt: {iovcnt}");
     let f = get_file_like(fd)?;
-    // Check immutable for regular files before writing.
+    // Combined immutable/append-only check — single INODE_FLAGS lookup.
     if let Some(file) = f.downcast_ref::<File>() {
-        check_not_immutable(file.inner().location())?;
-        check_not_append_only(file.inner().location())?;
+        let flags = get_inode_flags(file.inner().location());
+        if flags & (FS_IMMUTABLE_FL | FS_APPEND_FL) != 0 {
+            return Err(AxError::OperationNotPermitted);
+        }
     }
     let iov_buf = IoVectorBuf::new(iov, iovcnt)?;
     iov_buf.validate_readable()?;
@@ -253,8 +258,13 @@ pub fn sys_pwrite64(
         return Ok(0);
     }
     let f = File::from_fd(fd)?;
-    check_not_immutable(f.inner().location())?;
-    check_not_append_only(f.inner().location())?;
+    // Combined immutable/append-only check — single INODE_FLAGS lookup.
+    {
+        let flags = get_inode_flags(f.inner().location());
+        if flags & (FS_IMMUTABLE_FL | FS_APPEND_FL) != 0 {
+            return Err(AxError::OperationNotPermitted);
+        }
+    }
     let write = f.inner().write_at(VmBytes::new(buf, len), offset as _)?;
     Ok(write as _)
 }
@@ -340,8 +350,13 @@ pub fn sys_pwritev2(
     }
     check_pipe_offset_io(fd)?;
     let f = File::from_fd(fd)?;
-    check_not_immutable(f.inner().location())?;
-    check_not_append_only(f.inner().location())?;
+    // Combined immutable/append-only check — single INODE_FLAGS lookup.
+    {
+        let flags = get_inode_flags(f.inner().location());
+        if flags & (FS_IMMUTABLE_FL | FS_APPEND_FL) != 0 {
+            return Err(AxError::OperationNotPermitted);
+        }
+    }
     let iov = IoVectorBuf::new(iov, iovcnt)?;
     iov.validate_readable()?;
     f.inner()

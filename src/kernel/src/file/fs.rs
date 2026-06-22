@@ -564,8 +564,12 @@ impl FileLike for File {
 
     fn write(&self, src: &mut IoSrc) -> AxResult<usize> {
         let mut inner = self.inner();
+        // Only enter the RLIMIT_FSIZE slow path when the limit is
+        // explicitly finite.  RLIMIT_FSIZE == 0 is a valid finite
+        // limit (no bytes may be written); RLIM64_INFINITY is the
+        // default and must take the fast path.
         let file_limit = axtask::current().as_thread().proc_data.rlim.read()[RLIMIT_FSIZE].current;
-        if file_limit != 0 && file_limit != RLIM64_INFINITY as u64 {
+        if file_limit != RLIM64_INFINITY as u64 {
             let pos = inner.stream_position()?;
             if pos >= file_limit {
                 return Ok(0);

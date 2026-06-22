@@ -992,11 +992,18 @@ impl File {
         }
         if let Some(pos) = self.position.as_ref() {
             let mut pos = pos.lock();
-            if let Ok(f) = self.access(FileFlags::APPEND) {
-                f.append(src).map(|(written, new_size)| {
-                    *pos = new_size;
-                    written
-                })
+            // Check the APPEND flag directly to avoid a predictable
+            // access() failure on the hot path for normal (non-append)
+            // files.  access(APPEND) is only called when the flag is
+            // actually set; it additionally validates the handle is
+            // not PATH-only.
+            if self.flags().contains(FileFlags::APPEND) {
+                self.access(FileFlags::APPEND)?
+                    .append(src)
+                    .map(|(written, new_size)| {
+                        *pos = new_size;
+                        written
+                    })
             } else {
                 self.write_at(src, *pos).inspect(|n| {
                     *pos += *n as u64;
