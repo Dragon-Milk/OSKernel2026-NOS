@@ -15,10 +15,13 @@ ltp_batch_ids() {
         common-easy)
             echo "01"
             ;;
-        storage|storage-safe)
+        storage|storage-safe|storage-diagnostic-skip-crash)
             echo "01 02 03 04 05 06 07 08 09 10 11 12 13 14"
             ;;
         storage-handle-debug)
+            echo "01"
+            ;;
+        storage-splice-candidate)
             echo "01"
             ;;
         *)
@@ -31,9 +34,10 @@ ltp_batch_cases() {
     category="$1"
     batch="$2"
 
-    # Map storage-safe to storage for case-list lookup;
-    # dangerous-case skipping is handled at runtime in init.sh.
+    # Map storage-safe / storage-diagnostic-skip-crash to storage for
+    # case-list lookup; dangerous-case skipping is handled at runtime in init.sh.
     [ "$category" = "storage-safe" ] && category="storage"
+    [ "$category" = "storage-diagnostic-skip-crash" ] && category="storage"
 
     case "$category:$batch" in
         process:01)
@@ -1589,6 +1593,12 @@ ltp_batch_cases() {
                 'name_to_handle_at02' \
                 'open_by_handle_at01' \
                 'open_by_handle_at02' \
+
+            ;;
+        storage-splice-candidate:01)
+            printf '%s\n' \
+                'splice02' \
+                'splice07' \
 
             ;;
         common-easy:01)

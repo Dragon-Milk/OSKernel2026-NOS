@@ -7,6 +7,7 @@ use core::{
 
 use axerrno::{AxError, AxResult, LinuxError};
 use axfs::{FS_CONTEXT, FileFlags, OpenOptions};
+use axfs_ng_vfs::{NodeFlags, NodeType};
 use axio::{Seek, SeekFrom};
 use axpoll::{IoEvents, Pollable};
 use axtask::current;
@@ -607,6 +608,8 @@ pub fn sys_splice(
     );
 
     let mut has_pipe = false;
+    let mut src_is_pipe = false;
+    let mut dst_is_pipe = false;
 
     if DummyFd::from_fd(fd_in).is_ok() || DummyFd::from_fd(fd_out).is_ok() {
         return Err(AxError::BadFileDescriptor);
@@ -620,6 +623,10 @@ pub fn sys_splice(
         if off_in.vm_read()? < 0 {
             return Err(AxError::InvalidInput);
         }
+        // Reject directory fds: splice doesn't support them
+        if Directory::from_fd(fd_in).is_ok() {
+            return Err(AxError::InvalidInput);
+        }
         SendFile::Offset(File::from_fd(fd_in)?, off_in.cast())
     } else {
         if let Ok(src) = Pipe::from_fd(fd_in) {
@@ -627,13 +634,33 @@ pub fn sys_splice(
                 return Err(AxError::BadFileDescriptor);
             }
             has_pipe = true;
+            src_is_pipe = true;
         }
         if let Ok(file) = File::from_fd(fd_in)
             && file.inner().is_path()
         {
             return Err(AxError::InvalidInput);
         }
-        SendFile::Direct(get_file_like(fd_in)?)
+        // Reject directory fds: splice doesn't support them
+        if Directory::from_fd(fd_in).is_ok() {
+            return Err(AxError::InvalidInput);
+        }
+        // Reject sockets as splice source: they don't support splice_read
+        if Socket::from_fd(fd_in).is_ok() {
+            return Err(AxError::InvalidInput);
+        }
+        let f = get_file_like(fd_in)?;
+        // Non-pipe source must be readable; check before do_send so
+        // that an unreadable fd fails before we might block on a
+        // pipe destination (LTP splice07 file→pipe ordering).
+        if !src_is_pipe {
+            if let Some(file) = f.downcast_ref::<File>() {
+                if file.inner().access(FileFlags::READ).is_err() {
+                    return Err(AxError::BadFileDescriptor);
+                }
+            }
+        }
+        SendFile::Direct(f)
     };
 
     let dst = if !off_out.is_null() {
@@ -644,6 +671,10 @@ pub fn sys_splice(
         if off_out.vm_read()? < 0 {
             return Err(AxError::InvalidInput);
         }
+        // Reject directory fds: splice doesn't support them
+        if Directory::from_fd(fd_out).is_ok() {
+            return Err(AxError::InvalidInput);
+        }
         SendFile::Offset(File::from_fd(fd_out)?, off_out.cast())
     } else {
         if let Ok(dst) = Pipe::from_fd(fd_out) {
@@ -651,13 +682,46 @@ pub fn sys_splice(
                 return Err(AxError::BadFileDescriptor);
             }
             has_pipe = true;
+            dst_is_pipe = true;
         }
         if let Ok(file) = File::from_fd(fd_out)
             && file.inner().access(FileFlags::APPEND).is_ok()
         {
             return Err(AxError::InvalidInput);
         }
+        // Reject directory fds: splice doesn't support them
+        if Directory::from_fd(fd_out).is_ok() {
+            return Err(AxError::InvalidInput);
+        }
         let f = get_file_like(fd_out)?;
+        // Non-pipe destination must be a regular file on a real
+        // filesystem.  Pseudofs files (SimpleFile / RwFile, flagged
+        // NON_CACHEABLE) cannot store pipe data and would cause splice
+        // to hang on an empty pipe source (LTP splice07).
+        if !dst_is_pipe {
+            if let Some(file) = f.downcast_ref::<File>() {
+                let loc = file.inner().location();
+                let node_type = loc.metadata()?.node_type;
+                if node_type != NodeType::RegularFile {
+                    return Err(AxError::InvalidInput);
+                }
+                if loc.flags().contains(NodeFlags::NON_CACHEABLE) {
+                    return Err(AxError::InvalidInput);
+                }
+                // Destination must be writable; checked before
+                // do_send so a read-only file is rejected without
+                // first blocking on an empty pipe source (LTP
+                // splice07: pipe read end -> read-only file).
+                if file.inner().access(FileFlags::WRITE).is_err() {
+                    return Err(AxError::BadFileDescriptor);
+                }
+            } else {
+                // Not a regular file at all (e.g., Socket, EventFd,
+                // Epoll).  Reject: splice from a pipe requires the
+                // other end to be a pipe or a real regular file.
+                return Err(AxError::InvalidInput);
+            }
+        }
         // No probe write here: let do_send() handle write errors during
         // actual data transfer. An early probe would surface ENOTCONN for
         // unconnected sockets before we validate the pipe requirement,

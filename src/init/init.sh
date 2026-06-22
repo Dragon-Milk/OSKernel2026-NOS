@@ -201,7 +201,48 @@ ltp_storage_safe_skip() {
         open_tree*|move_mount*|mount_setattr*|mountns*)
             return 0
             ;;
-        splice07|tee01|tee02)
+        tee01|tee02)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+# Returns 0 (true) if the given case name should be skipped in
+# storage-diagnostic-skip-crash mode.
+# Skips cases known to crash/hang QEMU or trigger kernel panics during the
+# diagnostic sweep. Used to discover new safe candidates beyond the current
+# storage-safe.txt whitelist.
+#
+# Blockers:
+#   sendfile07 / sendfile07_64 – cascading memory allocation failures, QEMU crash
+#   fs_racer*                 – fs_racer_file_list.sh triggers FsContext re-entrant
+#                               lock panic (via procfs -> read_link -> fstatat);
+#                               fs_racer_dir_test.sh exits 143 (SIGTERM/timeout hang)
+#   fsstress                  – heavy stress, can hang the batch
+#   fsx-linux / fsx.sh        – filesystem exerciser, same risk
+#   growfiles                 – LTP growfiles stress, hangs
+#   rwtest                    – requires pre-created test files with matching paths
+#   read_all                  – reads /dev/* and /proc/* blindly, noise on bare-metal
+#   shell_pipe01.sh           – stdin-dependent, timeout/SIGTERM cleanup fails,
+#                               kill(-pgrp) fails with ESRCH, batch stalls
+#   fs_bind*                  – bind/mount propagation shell suite, LA can hang
+#                               in timeout cleanup; many variants, batch 03-06
+#   splice07                  – hangs on pipe read-end combo after passing many
+#                               fd pair TPASS; stuck beyond LTP_TIMEOUT without
+#                               reaching Summary, blocks diagnostic sweep
+ltp_storage_diagnostic_skip_crash() {
+    case "$1" in
+        sendfile07|sendfile07_64)
+            return 0
+            ;;
+        fs_racer*)
+            return 0
+            ;;
+        fs_bind*)
+            return 0
+            ;;
+        fsstress|fsx-linux|fsx.sh|growfiles|rwtest|read_all|shell_pipe01.sh|splice07|tee01|tee02)
             return 0
             ;;
     esac
@@ -611,7 +652,8 @@ run_ltp_one_batch_libc() {
     bb="$(busybox_cmd)"
     case_timeout="${LTP_TIMEOUT:-1}"
 
-    if [ "$LTP_CATEGORY" = "storage-safe" ]; then
+    # storage-safe / storage-diagnostic-skip-crash: prepare busybox commands once per libc
+    if [ "$LTP_CATEGORY" = "storage-safe" ] || [ "$LTP_CATEGORY" = "storage-diagnostic-skip-crash" ]; then
         prepare_storage_commands
     fi
 
@@ -645,6 +687,11 @@ run_ltp_one_batch_libc() {
 
         if [ "$LTP_CATEGORY" = "storage-safe" ] && ltp_storage_safe_skip "$name"; then
             echo "[LTP-STORAGE-SAFE-SKIP] $libc $name"
+            continue
+        fi
+
+        if [ "$LTP_CATEGORY" = "storage-diagnostic-skip-crash" ] && ltp_storage_diagnostic_skip_crash "$name"; then
+            echo "[LTP-STORAGE-DIAG-SKIP-CRASH] $libc $name"
             continue
         fi
 
@@ -721,7 +768,7 @@ run_ltp_batch_tests() {
     found=1
 
     case "$LTP_CATEGORY" in
-        process|fs|mm-ipc|common-easy|storage|storage-safe|storage-handle-debug) ;;
+        process|fs|mm-ipc|common-easy|storage|storage-safe|storage-handle-debug|storage-diagnostic-skip-crash|storage-splice-candidate) ;;
         *)
             echo "[LTP-BATCH-ERROR] unsupported category: $LTP_CATEGORY"
             return
