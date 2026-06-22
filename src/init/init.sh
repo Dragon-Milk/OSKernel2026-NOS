@@ -111,6 +111,8 @@ is_leftover_command() {
         "./netserver"*|"netserver"*|"/glibc/netserver"*|"/musl/netserver"*| \
         "./lmbench_all"*|"lmbench_all"*|"/glibc/lmbench_all"*|"/musl/lmbench_all"*| \
         "./pipe 10"*|"pipe 10"*|"/glibc/pipe 10"*|"/musl/pipe 10"*| \
+        "./hackbench"*|"hackbench"*|"/glibc/hackbench"*|"/musl/hackbench"*| \
+        "./cyclictest"*|"cyclictest"*|"/glibc/cyclictest"*|"/musl/cyclictest"*| \
         "./busybox sh ./lmbench_testcode.sh"*|"/glibc/busybox sh ./lmbench_testcode.sh"*|"/musl/busybox sh ./lmbench_testcode.sh"*| \
         "./busybox sh ./unixbench_testcode.sh"*|"/glibc/busybox sh ./unixbench_testcode.sh"*|"/musl/busybox sh ./unixbench_testcode.sh"*)
             return 0
@@ -122,7 +124,8 @@ is_leftover_command() {
 
 needs_cleanup() {
     case "$1" in
-        *iperf*|*netperf*|*lmbench*|*unixbench*)
+        *iperf*|*netperf*|*lmbench*|*unixbench*|*cyclictest*|*hackbench*)
+            echo "[init] cleanup after $1"
             return 0
             ;;
     esac
