@@ -17,6 +17,7 @@ export TEST_PROFILE ?= full-safe-short-before-ltp-skip-waste
 export LTP_CATEGORY ?= process
 export LTP_BATCH ?= all
 export LTP_LIBC ?= both
+export LTP_CASE_LIST ?=
 
 # Generated Options
 export A := $(CURDIR)

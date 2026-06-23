@@ -31,11 +31,13 @@ TEST_PROFILE=${TEST_PROFILE:-ltp-batch}
 LTP_CATEGORY=${LTP_CATEGORY:-process}
 LTP_BATCH=${LTP_BATCH:-all}
 LTP_LIBC=${LTP_LIBC:-both}
+LTP_CASE_LIST=${LTP_CASE_LIST:-}
 LTP_TIMEOUT=${LTP_TIMEOUT:-${LTP_CASE_TIMEOUT:-45}}
 export LTP_TIMEOUT
 FULL_SAFE_SKIP_WASTE=${FULL_SAFE_SKIP_WASTE:-1}
 echo "[init] TEST_PROFILE=$TEST_PROFILE"
 echo "[init] LTP_CATEGORY=$LTP_CATEGORY LTP_BATCH=$LTP_BATCH LTP_LIBC=$LTP_LIBC LTP_TIMEOUT=$LTP_TIMEOUT"
+echo "[init] LTP_CASE_LIST=$LTP_CASE_LIST"
 echo "[init] FULL_SAFE_SKIP_WASTE=$FULL_SAFE_SKIP_WASTE"
 
 entry_name_exists() {
@@ -880,7 +882,12 @@ run_ltp_safe_libc() {
     group="ltp-$libc"
     echo "#### OS COMP TEST GROUP START $group ####"
 
-    ltp_safe_cases | while read name; do
+    if [ -n "$LTP_CASE_LIST" ]; then
+        echo "[LTP-SAFE] explicit case-list: $LTP_CASE_LIST" >&2
+        printf '%s\n' $LTP_CASE_LIST
+    else
+        ltp_safe_cases
+    fi | while read name; do
         [ -n "$name" ] || continue
         file="ltp/testcases/bin/$name"
 
