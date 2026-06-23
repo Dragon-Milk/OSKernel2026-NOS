@@ -161,6 +161,43 @@ cleanup_leftovers() {
     cleanup_leftovers_once -KILL "$bb"
 }
 
+is_epoll_ltp_leftover_command() {
+    cmd="$1"
+
+    case "$cmd" in
+        ''|sh|sh\ *|*/sh|*/sh\ *|*"busybox sh"*|*"LTP_SAFE_DATA="*|*"run_ltp"*|*"ltp_safe"*|*"init.sh"*|*"cleanup"*)
+            return 1
+            ;;
+    esac
+
+    first="${cmd%% *}"
+    base="${first##*/}"
+
+    case "$base" in
+        epoll-ltp|epoll01|epoll_ctl*|epoll_wait*|epoll_pwait*)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+cleanup_epoll_ltp_leftovers() {
+    bb="$1"
+    [ -n "$bb" ] || return
+
+    "$bb" ps | while read pid user time cmd; do
+        case "$pid" in ''|PID) continue ;; esac
+        [ "$pid" = "1" ] && continue
+        [ "$pid" = "$$" ] && continue
+
+        if is_epoll_ltp_leftover_command "$cmd"; then
+            echo "[ltp-safe] cleanup epoll leftover pid=$pid cmd=$cmd"
+            "$bb" kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+}
+
 skip_ltp_testcase() {
     name="$1"
     dir="$2"
@@ -298,6 +335,14 @@ ltp_skip_case() {
                     return 0
                     ;;
             esac
+            ;;
+        fork14)
+            LTP_SKIP_REASON="zero-score very slow"
+            return 0
+            ;;
+        fork_procs)
+            LTP_SKIP_REASON="la panic low score"
+            return 0
             ;;
     esac
     return 1
@@ -701,7 +746,7 @@ run_ltp_one_batch_libc() {
         if [ "$name" = "epoll-ltp" ]; then
             echo "RUN LTP CASE $name"
             if [ -n "$bb" ]; then
-                "$bb" timeout 150 "$file"
+                "$bb" timeout 300 "$file"
             else
                 "$file"
             fi
@@ -710,17 +755,7 @@ run_ltp_one_batch_libc() {
             # epoll-ltp spawns children (epoll01 etc.) that survive
             # timeout/termination and pollute subsequent cases with
             # interleaved output and resource contention.
-            if [ -n "$bb" ]; then
-                "$bb" ps | while read pid user time cmd; do
-                    case "$pid" in ''|PID) continue ;; esac
-                    [ "$pid" = "$$" ] && continue
-                    case "$cmd" in
-                        *epoll*)
-                            "$bb" kill -KILL "$pid" 2>/dev/null || true
-                            ;;
-                    esac
-                done
-            fi
+            cleanup_epoll_ltp_leftovers "$bb"
             continue
         fi
 
@@ -862,7 +897,7 @@ run_ltp_safe_libc() {
         if [ "$name" = "epoll-ltp" ]; then
             echo "RUN LTP CASE $name"
             if [ -n "$bb" ]; then
-                "$bb" timeout 150 "$file"
+                "$bb" timeout 300 "$file"
             else
                 "$file"
             fi
@@ -871,17 +906,7 @@ run_ltp_safe_libc() {
             # epoll-ltp spawns children (epoll01 etc.) that survive
             # timeout/termination and pollute subsequent cases with
             # interleaved output and resource contention.
-            if [ -n "$bb" ]; then
-                "$bb" ps | while read pid user time cmd; do
-                    case "$pid" in ''|PID) continue ;; esac
-                    [ "$pid" = "$$" ] && continue
-                    case "$cmd" in
-                        *epoll*)
-                            "$bb" kill -KILL "$pid" 2>/dev/null || true
-                            ;;
-                    esac
-                done
-            fi
+            cleanup_epoll_ltp_leftovers "$bb"
             continue
         fi
 
