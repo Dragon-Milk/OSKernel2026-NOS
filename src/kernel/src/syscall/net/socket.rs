@@ -7,6 +7,7 @@ use axnet::{
     udp::UdpSocket,
     unix::{DgramTransport, StreamTransport, UnixSocket},
 };
+use core::net::{Ipv4Addr, SocketAddr};
 use axtask::current;
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
@@ -68,6 +69,18 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
 pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxResult<isize> {
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
     debug!("sys_bind <= fd: {fd}, addr: {addr:?}");
+
+    if let SocketAddrEx::Ip(SocketAddr::V4(addr_v4)) = &addr {
+        let euid = current().as_thread().proc_data.ids().1;
+        if euid != 0 && addr_v4.port() < 1024 {
+            return Err(AxError::from(LinuxError::EACCES));
+        }
+
+        let ip = *addr_v4.ip();
+        if !ip.is_unspecified() && !ip.is_loopback() && ip != Ipv4Addr::new(10, 0, 2, 15) {
+            return Err(AxError::from(LinuxError::EADDRNOTAVAIL));
+        }
+    }
 
     Socket::from_fd(fd)?.bind(addr)?;
 
