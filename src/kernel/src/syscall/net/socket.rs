@@ -19,7 +19,7 @@ use linux_raw_sys::{
 
 use super::addr::SocketAddrExt;
 use crate::{
-    file::{FileLike, Socket},
+    file::{FileLike, Socket, get_file_like},
     mm::{UserConstPtr, UserPtr},
     task::AsThread,
 };
@@ -59,7 +59,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
             return Err(AxError::from(LinuxError::EAFNOSUPPORT));
         }
     };
-    let socket = Socket(socket);
+    let socket = Socket::new(socket);
 
     if raw_ty & O_NONBLOCK != 0 {
         socket.set_nonblocking(true)?;
@@ -74,6 +74,11 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxResult
     debug!("sys_bind <= fd: {fd}, addr: {addr:?}");
 
     if let SocketAddrEx::Ip(SocketAddr::V4(addr_v4)) = &addr {
+        let euid = current().as_thread().proc_data.ids().1;
+        if euid != 0 && addr_v4.port() < 1024 {
+            return Err(AxError::from(LinuxError::EACCES));
+        }
+
         let ip = *addr_v4.ip();
         if !ip.is_unspecified() && !ip.is_loopback() && ip != Ipv4Addr::new(10, 0, 2, 15) {
             return Err(AxError::from(LinuxError::EADDRNOTAVAIL));
@@ -138,8 +143,11 @@ pub fn sys_accept4(
 
     let cloexec = flags & O_CLOEXEC != 0;
 
+    if get_file_like(fd)?.access_mode() & linux_raw_sys::general::O_PATH != 0 {
+        return Err(AxError::BadFileDescriptor);
+    }
     let socket = Socket::from_fd(fd)?;
-    let socket = Socket(socket.accept()?);
+    let socket = Socket::new(socket.accept()?);
     if flags & O_NONBLOCK != 0 {
         socket.set_nonblocking(true)?;
     }
@@ -213,8 +221,8 @@ pub fn sys_socketpair(
             return Err(AxError::from(LinuxError::ESOCKTNOSUPPORT));
         }
     };
-    let sock1 = Socket(SocketInner::Unix(sock1));
-    let sock2 = Socket(SocketInner::Unix(sock2));
+    let sock1 = Socket::new(SocketInner::Unix(sock1));
+    let sock2 = Socket::new(SocketInner::Unix(sock2));
 
     if raw_ty & O_NONBLOCK != 0 {
         sock1.set_nonblocking(true)?;

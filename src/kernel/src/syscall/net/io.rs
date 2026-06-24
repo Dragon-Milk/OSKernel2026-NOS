@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 use core::net::Ipv4Addr;
 
 use axerrno::{AxError, AxResult, LinuxError};
@@ -9,8 +9,8 @@ use axnet::{
 };
 use linux_raw_sys::general::timespec;
 use linux_raw_sys::net::{
-    MSG_ERRQUEUE, MSG_OOB, MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET, cmsghdr, mmsghdr, msghdr,
-    sockaddr, socklen_t,
+    MSG_DONTWAIT, MSG_ERRQUEUE, MSG_MORE, MSG_OOB, MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET,
+    cmsghdr, mmsghdr, msghdr, sockaddr, socklen_t,
 };
 
 use super::addr::SocketAddrExt;
@@ -19,6 +19,13 @@ use crate::{
     mm::{check_access, IoVec, IoVectorBuf, UserConstPtr, UserPtr, VmBytes, VmBytesMut},
     syscall::net::{CMsg, CMsgBuilder},
 };
+
+fn read_send_data(mut src: impl Read + IoBuf) -> AxResult<Vec<u8>> {
+    let mut data = vec![0; src.remaining()];
+    let read = src.read(&mut data)?;
+    data.truncate(read);
+    Ok(data)
+}
 
 fn send_impl(
     fd: i32,
@@ -41,6 +48,46 @@ fn send_impl(
         return Err(AxError::OperationNotSupported);
     }
     let is_tcp = matches!(&socket.0, SocketInner::Tcp(_));
+
+    if flags & MSG_MORE != 0 {
+        let data = read_send_data(src)?;
+        let sent = data.len();
+        socket.append_pending_send(data, addr, cmsg);
+        return Ok(sent as isize);
+    }
+
+    if let Some(mut pending) = socket.take_pending_send() {
+        let data = read_send_data(src)?;
+        let sent = data.len();
+        pending.data.extend(data);
+        if pending.to.is_none() {
+            pending.to = addr;
+        }
+        pending.cmsg.extend(cmsg);
+        if pending.data.len() > 65_507 && matches!(&socket.0, SocketInner::Udp(_)) {
+            return Err(LinuxError::EMSGSIZE.into());
+        }
+
+        let mut combined = pending.data.as_slice();
+        socket
+            .send(
+                &mut combined,
+                SendOptions {
+                    to: pending.to,
+                    flags: SendFlags::default(),
+                    cmsg: pending.cmsg,
+                },
+            )
+            .map_err(|err| {
+                if is_tcp && err == AxError::NotConnected {
+                    AxError::BrokenPipe
+                } else {
+                    err
+                }
+            })?;
+        return Ok(sent as isize);
+    }
+
     let sent = socket
         .send(
             &mut src,
@@ -171,14 +218,25 @@ fn recv_impl(
     let write_remote_addr = !addr.is_null();
     let mut remote_addr = (write_remote_addr || matches!(&socket.0, SocketInner::Udp(_)))
         .then(|| SocketAddrEx::Ip((Ipv4Addr::UNSPECIFIED, 0).into()));
-    let recv = socket.recv(
+    let restore_blocking = flags & MSG_DONTWAIT != 0 && !socket.nonblocking();
+    if restore_blocking {
+        socket.set_nonblocking(true)?;
+    }
+    let recv_result = socket.recv(
         &mut dst,
         RecvOptions {
             from: remote_addr.as_mut(),
             flags: recv_flags,
             cmsg: Some(&mut cmsg),
         },
-    )?;
+    );
+    if restore_blocking {
+        let restore_result = socket.set_nonblocking(false);
+        if recv_result.is_ok() {
+            restore_result?;
+        }
+    }
+    let recv = recv_result?;
 
     if recv != 0 && write_remote_addr {
         if let Some(remote_addr) = remote_addr {

@@ -1,5 +1,6 @@
 accept01
 accept02
+accept03
 accept4_01
 bind01
 bind02
@@ -15,6 +16,7 @@ recvfrom01
 recvmsg01
 recvmmsg01
 send01
+send02
 sendmmsg01
 sendmmsg02
 setsockopt01
