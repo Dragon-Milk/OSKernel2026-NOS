@@ -44,3 +44,4 @@ testsuits-for-oskernel/
 .understand-anything_en/
 .understand-anything/
 .submit-check-cargo/
+src/init/env.rs

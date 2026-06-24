@@ -85,6 +85,20 @@ clean:
 		$(LA_OUT_CONFIG) $(CURDIR)/.axconfig-loongarch64.old.toml
 
 build run debug disasm: defconfig
+	@{ \
+		printf 'pub const TEST_PROFILE_ENV: &str = r###"TEST_PROFILE=%s"###;\n' "$(TEST_PROFILE)"; \
+		printf 'pub const LTP_CATEGORY_ENV: &str = r###"LTP_CATEGORY=%s"###;\n' "$(LTP_CATEGORY)"; \
+		printf 'pub const LTP_BATCH_ENV: &str = r###"LTP_BATCH=%s"###;\n' "$(LTP_BATCH)"; \
+		printf 'pub const LTP_LIBC_ENV: &str = r###"LTP_LIBC=%s"###;\n' "$(LTP_LIBC)"; \
+		printf 'pub const LTP_TIMEOUT_ENV: &str = r###"LTP_TIMEOUT=%s"###;\n' "$(LTP_TIMEOUT)"; \
+		printf 'pub const LTP_CASE_LIST_ENV: &str = r###"LTP_CASE_LIST=%s"###;\n' "$(LTP_CASE_LIST)"; \
+	} > init/env.rs.tmp
+	@if cmp -s init/env.rs.tmp init/env.rs; then \
+		rm -f init/env.rs.tmp; \
+	else \
+		mv init/env.rs.tmp init/env.rs; \
+		touch init/main.rs; \
+	fi
 	@$(MAKE) -C make $@
 
 ci-test:
