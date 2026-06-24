@@ -85,9 +85,9 @@ ensure_busybox_applets() {
     done
 
     for applet in \
-        basename cat chmod chown cp cut date dirname echo env expr false grep head id killall ln ls \
-        mkdir mktemp mount mv printf pwd readlink rm rmdir sed sh sleep sort tail test touch \
-        tr true umount uname uniq wc which xargs zcat
+        awk basename cat chmod chown cp cut date dirname echo env expr false find grep head id \
+        killall ln ls mkdir mktemp mount mv printf pwd readlink rm rmdir sed seq sh sleep sort \
+        tail test touch tr true umount uname uniq wc which whoami xargs yes zcat
     do
         [ -e "/bin/$applet" ] || "$bb" ln -sf "$bb" "/bin/$applet" 2>/dev/null || true
         [ -e "/usr/bin/$applet" ] || "$bb" ln -sf "$bb" "/usr/bin/$applet" 2>/dev/null || true
@@ -484,13 +484,6 @@ run_ltp_one_batch_libc() {
     set_library_path "$dir"
     ensure_busybox_applets
     bb="$(busybox_cmd)"
-    if [ -n "$bb" ]; then
-        "$bb" rm -rf /usr/sbin/ltp 2>/dev/null || true
-        "$bb" ln -sfn "$dir/ltp" /usr/sbin/ltp 2>/dev/null || true
-    else
-        rm -rf /usr/sbin/ltp 2>/dev/null || true
-        ln -sfn "$dir/ltp" /usr/sbin/ltp 2>/dev/null || true
-    fi
     export LTPROOT="$dir/ltp"
     export LTP_DATAROOT="$dir/ltp/testcases/bin"
     export PATH="$dir/ltp/testcases/bin:$PATH"
@@ -512,9 +505,9 @@ run_ltp_one_batch_libc() {
 
         ret=0
         if [ -n "$bb" ]; then
-            "$bb" timeout "$case_timeout" "$file" || ret=$?
+            "$bb" timeout "$case_timeout" "$file" </dev/null || ret=$?
         else
-            "$file" || ret=$?
+            "$file" </dev/null || ret=$?
         fi
         echo "FAIL LTP CASE $name : $ret"
     done
@@ -636,9 +629,9 @@ run_ltp_safe_libc() {
 
         ret=0
         if [ -n "$bb" ]; then
-            "$bb" timeout "$case_timeout" "$file" || ret=$?
+            "$bb" timeout "$case_timeout" "$file" </dev/null || ret=$?
         else
-            "$file" || ret=$?
+            "$file" </dev/null || ret=$?
         fi
         echo "FAIL LTP CASE $name : $ret"
     done

@@ -24,7 +24,7 @@ use crate::{
         check_permission, check_writable_filesystem, clear_setgid_if_not_in_group,
         creation_metadata, do_getxattr, do_listxattr, do_removexattr, do_setxattr,
         get_file_like, get_inode_flags, is_directory_deleted, mark_directory_deleted, remove_inode_flags,
-        remove_xattr_map, resolve_at, set_inode_flags,
+        remove_xattr_map, resolve_at, resolve_parent_existing, set_inode_flags,
         with_fs, with_fs_at,
         FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, Socket,
     },
@@ -124,11 +124,29 @@ pub fn sys_chroot(path: *const c_char) -> AxResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_chroot <= path: {path}");
 
+    let credentials = VfsCredentials::effective();
+
+    // Check path and permissions first — these fail with EACCES/ENOENT/ENOTDIR,
+    // which is the expected errno even when the caller lacks CAP_SYS_CHROOT.
     let mut fs = FS_CONTEXT.lock();
+    check_path_search(&fs, &path, credentials)?;
     let loc = fs.resolve(path)?;
     if loc.node_type() != NodeType::Directory {
         return Err(AxError::NotADirectory);
     }
+    check_permission(&loc, credentials, AccessMode::EXEC)?;
+
+    // Capability check last: Linux returns EPERM only if the path is valid
+    // and accessible but the caller lacks CAP_SYS_CHROOT.
+    if !credentials.is_privileged()
+        || !current()
+            .as_thread()
+            .proc_data
+            .has_capability(CAP_SYS_CHROOT)
+    {
+        return Err(AxError::OperationNotPermitted);
+    }
+
     *fs = FsContext::new(loc);
     Ok(0)
 }
@@ -413,26 +431,15 @@ pub fn sys_unlinkat(dirfd: i32, path: *const c_char, flags: usize) -> AxResult<i
             remove_xattr_map(&entry);
             remove_inode_flags(&entry);
         } else {
-            // Resolve parent first so we can check read-only filesystem
-            // before attempting to find the entry itself.
-            // This is needed for LTP unlink09: rofs → EROFS even if the
-            // target file is not visible through the mountpoint.
             check_path_search(fs, &path, credentials)?;
-            let (parent, _) = fs.resolve_nonexistent(Path::new(&path))?;
+            let (parent, _) = resolve_parent_existing(fs, &path)?;
             check_permission(&parent, credentials, AccessMode::WRITE | AccessMode::EXEC)?;
             check_writable_filesystem(&parent)?;
 
             let entry = fs.resolve_no_follow(path.as_str())?;
-            if let Some(_parent) = entry.parent() {
-                // parent obtained from resolve_nonexistent already covers the
-                // filesystem check; use entry.parent() for sticky removal.
-                check_not_immutable(&entry)?;
-                check_not_append_only(&entry)?;
-                check_sticky_removal(&_parent, &entry, credentials)?;
-            } else {
-                check_not_immutable(&entry)?;
-                check_not_append_only(&entry)?;
-            }
+            check_not_immutable(&entry)?;
+            check_not_append_only(&entry)?;
+            check_sticky_removal(&parent, &entry, credentials)?;
             // Capture whether this is the last link *before* the backend
             // decrements nlink, so we know when to discard xattr / inode-flags.
             let last_link = entry.metadata().map(|m| m.nlink).unwrap_or(0) <= 1;
