@@ -109,6 +109,9 @@ faccessat01
 faccessat02
 faccessat201
 faccessat202
+fallocate01
+fallocate02
+fallocate03
 fchdir01
 fchdir02
 fchdir03
@@ -375,6 +378,8 @@ pipe13
 pipe14
 pipe2_01
 poll01
+posix_fadvise02
+posix_fadvise04
 ppoll01
 prctl01
 prctl02
@@ -483,6 +488,10 @@ select01
 select03
 select04
 send01
+sendfile02
+sendfile03
+sendfile04
+sendfile05
 sendto01
 set_tid_address01
 setdomainname01
@@ -578,6 +587,11 @@ socket01
 socket02
 socketpair01
 socketpair02
+splice01
+splice02
+splice03
+splice04
+splice07
 ssetmask01
 stat01
 stat01_64
