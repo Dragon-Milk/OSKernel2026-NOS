@@ -1,18 +1,53 @@
-use alloc::{borrow::Cow, format, sync::Arc};
+use alloc::{borrow::Cow, format, sync::Arc, vec::Vec};
 use core::{ffi::c_int, ops::Deref, task::Context};
 
 use axerrno::{AxError, AxResult};
 use axnet::{
-    RecvOptions, SendOptions, Socket as SocketInner, SocketOps,
+    CMsgData, RecvOptions, SendOptions, Socket as SocketInner, SocketAddrEx, SocketOps,
     options::{Configurable, GetSocketOption, SetSocketOption},
 };
 use axpoll::{IoEvents, Pollable};
+use axsync::Mutex;
 use linux_raw_sys::general::{O_RDWR, S_IFSOCK};
 
 use super::{FileLike, Kstat};
 use crate::file::{IoDst, IoSrc, get_file_like};
 
-pub struct Socket(pub SocketInner);
+pub struct PendingSend {
+    pub data: Vec<u8>,
+    pub to: Option<SocketAddrEx>,
+    pub cmsg: Vec<CMsgData>,
+}
+
+pub struct Socket(pub SocketInner, Mutex<Option<PendingSend>>);
+
+impl Socket {
+    pub fn new(inner: SocketInner) -> Self {
+        Self(inner, Mutex::new(None))
+    }
+
+    pub fn append_pending_send(
+        &self,
+        data: Vec<u8>,
+        to: Option<SocketAddrEx>,
+        cmsg: Vec<CMsgData>,
+    ) {
+        let mut pending = self.1.lock();
+        if let Some(pending) = pending.as_mut() {
+            pending.data.extend(data);
+            if pending.to.is_none() {
+                pending.to = to;
+            }
+            pending.cmsg.extend(cmsg);
+        } else {
+            *pending = Some(PendingSend { data, to, cmsg });
+        }
+    }
+
+    pub fn take_pending_send(&self) -> Option<PendingSend> {
+        self.1.lock().take()
+    }
+}
 
 impl Deref for Socket {
     type Target = SocketInner;

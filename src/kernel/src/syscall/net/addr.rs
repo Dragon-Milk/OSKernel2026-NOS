@@ -42,6 +42,9 @@ unsafe fn cast_to_slice<T>(value: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(value as *const T as *const u8, size_of::<T>()) }
 }
 fn fill_addr(addr: UserPtr<sockaddr>, addrlen: &mut socklen_t, data: &[u8]) -> AxResult<()> {
+    if *addrlen > 4096 {
+        return Err(AxError::InvalidInput);
+    }
     let len = (*addrlen as usize).min(data.len());
     addr.cast::<u8>()
         .get_as_mut_slice(len)?

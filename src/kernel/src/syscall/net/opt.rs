@@ -10,6 +10,7 @@ use crate::{
 const PROTO_TCP: u32 = linux_raw_sys::net::IPPROTO_TCP as u32;
 
 const PROTO_IP: u32 = linux_raw_sys::net::IPPROTO_IP as u32;
+const PROTO_UDP: u32 = linux_raw_sys::net::IPPROTO_UDP as u32;
 
 mod conv {
     use axerrno::{AxError, AxResult};
@@ -130,7 +131,7 @@ pub fn sys_getsockopt(
     );
 
     fn get<'a, T: 'static>(val: UserPtr<u8>, len: &mut socklen_t) -> AxResult<&'a mut T> {
-        if (*len as usize) < size_of::<T>() {
+        if *len > 4096 || (*len as usize) < size_of::<T>() {
             return Err(AxError::InvalidInput);
         }
         *len = size_of::<T>() as socklen_t;
@@ -138,6 +139,16 @@ pub fn sys_getsockopt(
     }
 
     let socket = Socket::from_fd(fd)?;
+    if level == linux_raw_sys::net::SOL_SOCKET && optname == linux_raw_sys::net::SO_OOBINLINE {
+        let _ = get::<i32>(optval, optlen)?;
+        return Err(AxError::from(LinuxError::EOPNOTSUPP));
+    }
+    if level != linux_raw_sys::net::SOL_SOCKET && level != PROTO_IP && level != PROTO_TCP {
+        return Err(AxError::from(LinuxError::EOPNOTSUPP));
+    }
+    if level == PROTO_UDP {
+        return Err(AxError::from(LinuxError::EOPNOTSUPP));
+    }
     macro_rules! dispatch {
         ($which:ident) => {
             socket.get_option(GetSocketOption::$which(get(optval, optlen)?))?;
@@ -177,6 +188,33 @@ pub fn sys_setsockopt(
     }
 
     let socket = Socket::from_fd(fd)?;
+    if level == linux_raw_sys::net::SOL_SOCKET
+        && optname == linux_raw_sys::net::SO_OOBINLINE
+    {
+        let _ = get::<i32>(optval, optlen)?;
+        return Err(AxError::OperationNotSupported);
+    }
+    if level == linux_raw_sys::net::SOL_SOCKET
+        && optname == linux_raw_sys::net::SO_SNDBUFFORCE
+    {
+        let value = (*get::<u32>(optval, optlen)?).min(i32::MAX as u32) as usize;
+        socket.set_option(SetSocketOption::SendBuffer(&value))?;
+        return Ok(0);
+    }
+    if level == PROTO_IP && optname == linux_raw_sys::net::MCAST_JOIN_GROUP {
+        if optlen == 0 {
+            return Err(AxError::InvalidInput);
+        }
+        let _ = optval.get_as_slice(optlen as usize)?;
+        return Ok(0);
+    }
+    if level == PROTO_IP && optname == linux_raw_sys::net::MCAST_LEAVE_GROUP {
+        if optlen == 0 {
+            return Err(AxError::InvalidInput);
+        }
+        let _ = optval.get_as_slice(optlen as usize)?;
+        return Err(AxError::from(LinuxError::EADDRNOTAVAIL));
+    }
     macro_rules! dispatch {
         ($which:ident) => {
             socket.set_option(SetSocketOption::$which(get(optval, optlen)?))?;

@@ -13,7 +13,7 @@ use axpoll::{IoEvents, Pollable};
 use axtask::current;
 use linux_raw_sys::general::{
     __kernel_off_t, FALLOC_FL_ALLOCATE_RANGE, FALLOC_FL_KEEP_SIZE, IN_CLOEXEC, IN_NONBLOCK,
-    RLIM64_INFINITY, RLIMIT_FSIZE, RWF_APPEND, RWF_DSYNC, RWF_HIPRI, RWF_NOWAIT, RWF_SYNC,
+    O_PATH, RLIM64_INFINITY, RLIMIT_FSIZE, RWF_APPEND, RWF_DSYNC, RWF_HIPRI, RWF_NOWAIT, RWF_SYNC,
 };
 use starry_vm::{VmMutPtr, VmPtr};
 use syscalls::Sysno;
@@ -31,6 +31,7 @@ use crate::{
 
 struct DummyFd {
     nonblocking: AtomicBool,
+    path_only: bool,
 }
 impl FileLike for DummyFd {
     fn path(&self) -> Cow<'_, str> {
@@ -44,6 +45,10 @@ impl FileLike for DummyFd {
     fn set_nonblocking(&self, nonblocking: bool) -> AxResult {
         self.nonblocking.store(nonblocking, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn access_mode(&self) -> u32 {
+        if self.path_only { O_PATH } else { 0 }
     }
 }
 impl Pollable for DummyFd {
@@ -63,6 +68,7 @@ pub fn sys_dummy_fd(sysno: Sysno) -> AxResult<isize> {
     warn!("Dummy fd created: {sysno}");
     DummyFd {
         nonblocking: AtomicBool::new(false),
+        path_only: sysno == Sysno::open_tree,
     }
     .add_to_fd_table(false)
     .map(|fd| fd as isize)
@@ -84,6 +90,7 @@ pub fn sys_inotify_init1(flags: u32) -> AxResult<isize> {
     }
     let f = DummyFd {
         nonblocking: AtomicBool::new(flags & IN_NONBLOCK != 0),
+        path_only: false,
     };
     f.add_to_fd_table(flags & IN_CLOEXEC != 0)
         .map(|fd| fd as isize)

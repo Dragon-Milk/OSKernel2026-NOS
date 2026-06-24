@@ -7,6 +7,7 @@ use axnet::{
     udp::UdpSocket,
     unix::{DgramTransport, StreamTransport, UnixSocket},
 };
+use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use axtask::current;
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
@@ -18,7 +19,7 @@ use linux_raw_sys::{
 
 use super::addr::SocketAddrExt;
 use crate::{
-    file::{FileLike, Socket},
+    file::{FileLike, Socket, get_file_like},
     mm::{UserConstPtr, UserPtr},
     task::AsThread,
 };
@@ -47,15 +48,18 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
         (AF_VSOCK, SOCK_STREAM) => {
             SocketInner::Vsock(VsockSocket::new(VsockStreamTransport::new()))
         }
+        (AF_INET, linux_raw_sys::net::SOCK_RAW) => {
+            return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
+        }
         (AF_INET, _) | (AF_UNIX, _) | (AF_VSOCK, _) => {
             warn!("Unsupported socket type: domain: {domain}, ty: {ty}");
-            return Err(AxError::from(LinuxError::ESOCKTNOSUPPORT));
+            return Err(AxError::InvalidInput);
         }
         _ => {
             return Err(AxError::from(LinuxError::EAFNOSUPPORT));
         }
     };
-    let socket = Socket(socket);
+    let socket = Socket::new(socket);
 
     if raw_ty & O_NONBLOCK != 0 {
         socket.set_nonblocking(true)?;
@@ -69,13 +73,33 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxResult
     let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
     debug!("sys_bind <= fd: {fd}, addr: {addr:?}");
 
+    if let SocketAddrEx::Ip(SocketAddr::V4(addr_v4)) = &addr {
+        let euid = current().as_thread().proc_data.ids().1;
+        if euid != 0 && addr_v4.port() < 1024 {
+            return Err(AxError::from(LinuxError::EACCES));
+        }
+
+        let ip = *addr_v4.ip();
+        if !ip.is_unspecified() && !ip.is_loopback() && ip != Ipv4Addr::new(10, 0, 2, 15) {
+            return Err(AxError::from(LinuxError::EADDRNOTAVAIL));
+        }
+    }
+
     Socket::from_fd(fd)?.bind(addr)?;
 
     Ok(0)
 }
 
 pub fn sys_connect(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxResult<isize> {
-    let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
+    let addr = match SocketAddrEx::read_from_user(addr, addrlen)? {
+        SocketAddrEx::Ip(SocketAddr::V4(addr_v4)) if addr_v4.ip().is_unspecified() => {
+            SocketAddrEx::Ip(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::LOCALHOST,
+                addr_v4.port(),
+            )))
+        }
+        addr => addr,
+    };
     debug!("sys_connect <= fd: {fd}, addr: {addr:?}");
 
     Socket::from_fd(fd)?.connect(addr).map_err(|e| {
@@ -119,8 +143,11 @@ pub fn sys_accept4(
 
     let cloexec = flags & O_CLOEXEC != 0;
 
+    if get_file_like(fd)?.access_mode() & linux_raw_sys::general::O_PATH != 0 {
+        return Err(AxError::BadFileDescriptor);
+    }
     let socket = Socket::from_fd(fd)?;
-    let socket = Socket(socket.accept()?);
+    let socket = Socket::new(socket.accept()?);
     if flags & O_NONBLOCK != 0 {
         socket.set_nonblocking(true)?;
     }
@@ -159,7 +186,24 @@ pub fn sys_socketpair(
     let ty = raw_ty & 0xFF;
 
     if domain != AF_UNIX {
-        return Err(AxError::from(LinuxError::EAFNOSUPPORT));
+        if domain != AF_INET {
+            return Err(AxError::from(LinuxError::EAFNOSUPPORT));
+        }
+        return match (ty, proto) {
+            (linux_raw_sys::net::SOCK_RAW, _) => {
+                Err(AxError::from(LinuxError::EPROTONOSUPPORT))
+            }
+            (SOCK_DGRAM, x) if x == IPPROTO_UDP as u32 => {
+                Err(AxError::OperationNotSupported)
+            }
+            (SOCK_STREAM, x) if x == IPPROTO_TCP as u32 => {
+                Err(AxError::OperationNotSupported)
+            }
+            (SOCK_DGRAM | SOCK_STREAM, _) => {
+                Err(AxError::from(LinuxError::EPROTONOSUPPORT))
+            }
+            _ => Err(AxError::InvalidInput),
+        };
     }
 
     let pid = current().as_thread().proc_data.proc.pid();
@@ -177,8 +221,8 @@ pub fn sys_socketpair(
             return Err(AxError::from(LinuxError::ESOCKTNOSUPPORT));
         }
     };
-    let sock1 = Socket(SocketInner::Unix(sock1));
-    let sock2 = Socket(SocketInner::Unix(sock2));
+    let sock1 = Socket::new(SocketInner::Unix(sock1));
+    let sock2 = Socket::new(SocketInner::Unix(sock2));
 
     if raw_ty & O_NONBLOCK != 0 {
         sock1.set_nonblocking(true)?;

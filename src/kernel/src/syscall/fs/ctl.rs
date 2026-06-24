@@ -1,7 +1,7 @@
 use alloc::{ffi::CString, string::String, vec, vec::Vec};
 use core::{
     ffi::{c_char, c_int},
-    mem::offset_of,
+    mem::{offset_of, size_of},
     time::Duration,
 };
 
@@ -12,7 +12,8 @@ use axhal::time::wall_time;
 use axtask::current;
 use linux_raw_sys::{
     general::*,
-    ioctl::{FIONBIO, TIOCGWINSZ},
+    ioctl::{FIONBIO, SIOCATMARK, SIOCGIFCONF, SIOCGIFFLAGS, SIOCSIFFLAGS, TIOCGWINSZ},
+    net::{ifconf, ifreq, net_device_flags},
 };
 use starry_vm::{VmMutPtr, VmPtr, vm_read_slice, vm_write_slice};
 
@@ -76,6 +77,48 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> AxResult<isize> {
         let user_flags = (arg as *const u32).vm_read()?;
         set_inode_flags(&loc, user_flags);
         return Ok(0);
+    }
+    if let Some(socket) = f.downcast_ref::<Socket>() {
+        match cmd {
+            SIOCATMARK => {
+                if matches!(&socket.0, axnet::Socket::Udp(_)) {
+                    return Err(AxError::NotATty);
+                }
+                (arg as *mut i32).vm_write(0)?;
+                return Ok(0);
+            }
+            SIOCGIFCONF => {
+                let mut config = unsafe { (arg as *const ifconf).vm_read_uninit()?.assume_init() };
+                let mut request: ifreq = unsafe { core::mem::zeroed() };
+                unsafe {
+                    request.ifr_ifrn.ifrn_name[0] = b'l' as _;
+                    request.ifr_ifrn.ifrn_name[1] = b'o' as _;
+                }
+                if config.ifc_len >= size_of::<ifreq>() as i32 {
+                    let request_ptr = unsafe { config.ifc_ifcu.ifcu_req };
+                    request_ptr.vm_write(request)?;
+                    config.ifc_len = size_of::<ifreq>() as i32;
+                } else {
+                    config.ifc_len = 0;
+                }
+                (arg as *mut ifconf).vm_write(config)?;
+                return Ok(0);
+            }
+            SIOCGIFFLAGS => {
+                let mut request = unsafe { (arg as *const ifreq).vm_read_uninit()?.assume_init() };
+                request.ifr_ifru.ifru_flags =
+                    net_device_flags::IFF_UP as i16
+                    | net_device_flags::IFF_LOOPBACK as i16
+                    | net_device_flags::IFF_RUNNING as i16;
+                (arg as *mut ifreq).vm_write(request)?;
+                return Ok(0);
+            }
+            SIOCSIFFLAGS => {
+                let _ = unsafe { (arg as *const ifreq).vm_read_uninit()?.assume_init() };
+                return Ok(0);
+            }
+            _ => {}
+        }
     }
     // TCGETA / TCSETA read/write termio structs from/to user memory.
     // Validate the user pointer BEFORE dispatching to the file-specific

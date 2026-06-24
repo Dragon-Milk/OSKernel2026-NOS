@@ -748,3 +748,10 @@ write06
 writev01
 writev03
 writev07
+accept02
+bind02
+send02
+sendmmsg01
+sendmmsg02
+setsockopt04
+sockioctl01
