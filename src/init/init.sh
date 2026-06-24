@@ -1063,6 +1063,9 @@ case "$TEST_PROFILE" in
             run_test_dir "$dir"
         done
         ;;
+    ltp-safe)
+        run_ltp_safe_tests
+        ;;
     full-safe)
         prepare_basic_scripts
         prepare_stable_test_env

@@ -17,14 +17,17 @@ pub const CMDLINES: &[&[&str]] = &[
     &["/glibc/busybox", "sh", "-c", INIT_SCRIPT],
 ];
 
+include!("env.rs");
+
 #[unsafe(no_mangle)]
 fn main() {
     let envs = [
-        concat!("TEST_PROFILE=", env!("TEST_PROFILE")),
-        concat!("LTP_CATEGORY=", env!("LTP_CATEGORY")),
-        concat!("LTP_BATCH=", env!("LTP_BATCH")),
-        concat!("LTP_LIBC=", env!("LTP_LIBC")),
-        concat!("LTP_CASE_LIST=", env!("LTP_CASE_LIST")),
+        TEST_PROFILE_ENV,
+        LTP_CATEGORY_ENV,
+        LTP_BATCH_ENV,
+        LTP_LIBC_ENV,
+        LTP_TIMEOUT_ENV,
+        LTP_CASE_LIST_ENV,
     ];
 
     starry_kernel::entry::init(CMDLINES, &envs);
