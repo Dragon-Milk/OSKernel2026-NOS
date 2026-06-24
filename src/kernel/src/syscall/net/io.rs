@@ -1,17 +1,22 @@
 use alloc::{boxed::Box, vec::Vec};
 use core::net::Ipv4Addr;
 
-use axerrno::{AxError, AxResult};
+use axerrno::{AxError, AxResult, LinuxError};
 use axio::prelude::*;
-use axnet::{CMsgData, RecvFlags, RecvOptions, SendFlags, SendOptions, SocketAddrEx, SocketOps};
+use axnet::{
+    CMsgData, RecvFlags, RecvOptions, SendFlags, SendOptions, Socket as SocketInner, SocketAddrEx,
+    SocketOps,
+};
+use linux_raw_sys::general::timespec;
 use linux_raw_sys::net::{
-    MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET, cmsghdr, msghdr, sockaddr, socklen_t,
+    MSG_ERRQUEUE, MSG_OOB, MSG_PEEK, MSG_TRUNC, SCM_RIGHTS, SOL_SOCKET, cmsghdr, mmsghdr, msghdr,
+    sockaddr, socklen_t,
 };
 
 use super::addr::SocketAddrExt;
 use crate::{
     file::{FileLike, Socket, add_file_like},
-    mm::{IoVec, IoVectorBuf, UserConstPtr, UserPtr, VmBytes, VmBytesMut},
+    mm::{check_access, IoVec, IoVectorBuf, UserConstPtr, UserPtr, VmBytes, VmBytesMut},
     syscall::net::{CMsg, CMsgBuilder},
 };
 
@@ -32,14 +37,26 @@ fn send_impl(
     debug!("sys_send <= fd: {fd}, flags: {flags}, addr: {addr:?}");
 
     let socket = Socket::from_fd(fd)?;
-    let sent = socket.send(
-        &mut src,
-        SendOptions {
-            to: addr,
-            flags: SendFlags::default(),
-            cmsg,
-        },
-    )?;
+    if flags & MSG_OOB != 0 && matches!(&socket.0, SocketInner::Udp(_)) {
+        return Err(AxError::OperationNotSupported);
+    }
+    let is_tcp = matches!(&socket.0, SocketInner::Tcp(_));
+    let sent = socket
+        .send(
+            &mut src,
+            SendOptions {
+                to: addr,
+                flags: SendFlags::default(),
+                cmsg,
+            },
+        )
+        .map_err(|err| {
+            if is_tcp && err == AxError::NotConnected {
+                AxError::BrokenPipe
+            } else {
+                err
+            }
+        })?;
 
     Ok(sent as isize)
 }
@@ -52,11 +69,25 @@ pub fn sys_sendto(
     addr: UserConstPtr<sockaddr>,
     addrlen: socklen_t,
 ) -> AxResult<isize> {
+    let socket = Socket::from_fd(fd)?;
+    if len != 0 {
+        check_access(buf as usize, len).map_err(|_| AxError::BadAddress)?;
+    }
+    if len > 65_507 && matches!(&socket.0, SocketInner::Udp(_)) {
+        return Err(LinuxError::EMSGSIZE.into());
+    }
+    let (addr, addrlen) = if matches!(&socket.0, SocketInner::Tcp(_)) {
+        (UserConstPtr::from(0), 0)
+    } else {
+        (addr, addrlen)
+    };
     send_impl(fd, VmBytes::new(buf, len), flags, addr, addrlen, Vec::new())
 }
 
-pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> AxResult<isize> {
-    let msg = msg.get_as_ref()?;
+fn send_msg(fd: i32, msg: &msghdr, flags: u32) -> AxResult<isize> {
+    if msg.msg_iovlen > 1024 {
+        return Err(LinuxError::EMSGSIZE.into());
+    }
     let mut cmsg = Vec::new();
     if !msg.msg_control.is_null() {
         let mut ptr = msg.msg_control as usize;
@@ -80,6 +111,36 @@ pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> AxResult<i
     )
 }
 
+pub fn sys_sendmsg(fd: i32, msg: UserConstPtr<msghdr>, flags: u32) -> AxResult<isize> {
+    send_msg(fd, msg.get_as_ref()?, flags)
+}
+
+pub fn sys_sendmmsg(
+    fd: i32,
+    msgvec: UserPtr<mmsghdr>,
+    vlen: usize,
+    flags: u32,
+) -> AxResult<isize> {
+    Socket::from_fd(fd)?;
+    if vlen == 0 || vlen > 1024 {
+        return Err(AxError::InvalidInput);
+    }
+
+    let messages = msgvec.get_as_mut_slice(vlen)?;
+    let mut sent_count = 0;
+    for message in messages {
+        match send_msg(fd, &message.msg_hdr, flags) {
+            Ok(sent) => {
+                message.msg_len = sent as _;
+                sent_count += 1;
+            }
+            Err(err) if sent_count == 0 => return Err(err),
+            Err(_) => break,
+        }
+    }
+    Ok(sent_count)
+}
+
 fn recv_impl(
     fd: i32,
     mut dst: impl Write + IoBufMut,
@@ -91,6 +152,12 @@ fn recv_impl(
     debug!("sys_recv <= fd: {fd}, flags: {flags}");
 
     let socket = Socket::from_fd(fd)?;
+    if flags & MSG_OOB != 0 {
+        return Err(AxError::InvalidInput);
+    }
+    if flags & MSG_ERRQUEUE != 0 {
+        return Err(AxError::WouldBlock);
+    }
     let mut recv_flags = RecvFlags::empty();
     if flags & MSG_PEEK != 0 {
         recv_flags |= RecvFlags::PEEK;
@@ -101,8 +168,9 @@ fn recv_impl(
 
     let mut cmsg = Vec::new();
 
-    let mut remote_addr =
-        (!addr.is_null()).then(|| SocketAddrEx::Ip((Ipv4Addr::UNSPECIFIED, 0).into()));
+    let write_remote_addr = !addr.is_null();
+    let mut remote_addr = (write_remote_addr || matches!(&socket.0, SocketInner::Udp(_)))
+        .then(|| SocketAddrEx::Ip((Ipv4Addr::UNSPECIFIED, 0).into()));
     let recv = socket.recv(
         &mut dst,
         RecvOptions {
@@ -112,8 +180,10 @@ fn recv_impl(
         },
     )?;
 
-    if let Some(remote_addr) = remote_addr {
-        remote_addr.write_to_user(addr, addrlen.get_as_mut()?)?;
+    if recv != 0 && write_remote_addr {
+        if let Some(remote_addr) = remote_addr {
+            remote_addr.write_to_user(addr, addrlen.get_as_mut()?)?;
+        }
     }
 
     if let Some(mut builder) = cmsg_builder {
@@ -152,11 +222,22 @@ pub fn sys_recvfrom(
     addr: UserPtr<sockaddr>,
     addrlen: UserPtr<socklen_t>,
 ) -> AxResult<isize> {
+    let socket = Socket::from_fd(fd)?;
+    let (addr, addrlen) = if matches!(&socket.0, SocketInner::Tcp(_)) {
+        if !addr.is_null() && *addrlen.get_as_mut()? > 4096 {
+            return Err(AxError::InvalidInput);
+        }
+        (UserPtr::from(0), UserPtr::from(0))
+    } else {
+        (addr, addrlen)
+    };
     recv_impl(fd, VmBytesMut::new(buf, len), flags, addr, addrlen, None)
 }
 
-pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> AxResult<isize> {
-    let msg = msg.get_as_mut()?;
+fn recv_msg(fd: i32, msg: &mut msghdr, flags: u32) -> AxResult<isize> {
+    if msg.msg_iovlen > 1024 {
+        return Err(LinuxError::EMSGSIZE.into());
+    }
     recv_impl(
         fd,
         IoVectorBuf::new(msg.msg_iov as *mut IoVec, msg.msg_iovlen)?.into_io(),
@@ -170,4 +251,42 @@ pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> AxResult<isize>
             )
         }),
     )
+}
+
+pub fn sys_recvmsg(fd: i32, msg: UserPtr<msghdr>, flags: u32) -> AxResult<isize> {
+    recv_msg(fd, msg.get_as_mut()?, flags)
+}
+
+pub fn sys_recvmmsg(
+    fd: i32,
+    msgvec: UserPtr<mmsghdr>,
+    vlen: usize,
+    flags: u32,
+    timeout: UserConstPtr<timespec>,
+) -> AxResult<isize> {
+    Socket::from_fd(fd)?;
+    if vlen == 0 || vlen > 1024 {
+        return Err(AxError::InvalidInput);
+    }
+
+    let messages = msgvec.get_as_mut_slice(vlen)?;
+    if !timeout.is_null() {
+        let timeout = timeout.get_as_ref()?;
+        if timeout.tv_sec < 0 || timeout.tv_nsec < 0 || timeout.tv_nsec >= 1_000_000_000 {
+            return Err(AxError::InvalidInput);
+        }
+    }
+
+    let mut received_count = 0;
+    for message in messages {
+        match recv_msg(fd, &mut message.msg_hdr, flags) {
+            Ok(received) => {
+                message.msg_len = received as _;
+                received_count += 1;
+            }
+            Err(err) if received_count == 0 => return Err(err),
+            Err(_) => break,
+        }
+    }
+    Ok(received_count)
 }

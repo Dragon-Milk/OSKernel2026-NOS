@@ -21,13 +21,15 @@ use memory_addr::PAGE_SIZE_4K;
 use starry_process::Process;
 
 use crate::{
-    file::{FD_TABLE, PIPE_MAX_SIZE},
+    file::FD_TABLE,
     pseudofs::{
         DirMaker, DirMapping, NodeOpsMux, RwFile, SimpleDir, SimpleDirOps, SimpleFile,
         SimpleFileOperation, SimpleFs,
     },
-    task::{AsThread, TaskStat, get_process_task, get_task, tasks},
+    task::{AsThread, TaskStat, get_task, tasks},
 };
+
+static PIPE_MAX_SIZE: AtomicUsize = AtomicUsize::new(1_048_576);
 
 const DUMMY_MEMINFO: &str = indoc! {"
     MemTotal:       32536204 kB
@@ -367,13 +369,14 @@ impl SimpleDirOps for ProcFsHandler {
         let task = if name == "self" {
             current().clone()
         } else {
-            let pid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
+            let mut pid = name.parse::<u32>().map_err(|_| VfsError::NotFound)?;
             if pid == 1 {
-                let init_pid = starry_process::init_proc().pid();
-                get_process_task(init_pid).map_err(|_| VfsError::NotFound)?
-            } else {
-                get_process_task(pid).map_err(|_| VfsError::NotFound)?
+                pid = starry_process::init_proc().pid();
             }
+            tasks()
+                .into_iter()
+                .find(|task| task.as_thread().proc_data.proc.pid() == pid)
+                .ok_or(VfsError::NotFound)?
         };
         let node = NodeOpsMux::Dir(SimpleDir::new_maker(
             self.0.clone(),

@@ -188,6 +188,19 @@ pub fn sys_setsockopt(
     }
 
     let socket = Socket::from_fd(fd)?;
+    if level == linux_raw_sys::net::SOL_SOCKET
+        && optname == linux_raw_sys::net::SO_OOBINLINE
+    {
+        let _ = get::<i32>(optval, optlen)?;
+        return Err(AxError::OperationNotSupported);
+    }
+    if level == linux_raw_sys::net::SOL_SOCKET
+        && optname == linux_raw_sys::net::SO_SNDBUFFORCE
+    {
+        let value = (*get::<u32>(optval, optlen)?).min(i32::MAX as u32) as usize;
+        socket.set_option(SetSocketOption::SendBuffer(&value))?;
+        return Ok(0);
+    }
     if level == PROTO_IP && optname == linux_raw_sys::net::MCAST_JOIN_GROUP {
         if optlen == 0 {
             return Err(AxError::InvalidInput);

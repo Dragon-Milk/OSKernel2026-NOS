@@ -7,7 +7,7 @@ use axnet::{
     udp::UdpSocket,
     unix::{DgramTransport, StreamTransport, UnixSocket},
 };
-use core::net::{Ipv4Addr, SocketAddr};
+use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use axtask::current;
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
@@ -48,9 +48,12 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> AxResult<isize> {
         (AF_VSOCK, SOCK_STREAM) => {
             SocketInner::Vsock(VsockSocket::new(VsockStreamTransport::new()))
         }
+        (AF_INET, linux_raw_sys::net::SOCK_RAW) => {
+            return Err(AxError::from(LinuxError::EPROTONOSUPPORT));
+        }
         (AF_INET, _) | (AF_UNIX, _) | (AF_VSOCK, _) => {
             warn!("Unsupported socket type: domain: {domain}, ty: {ty}");
-            return Err(AxError::from(LinuxError::ESOCKTNOSUPPORT));
+            return Err(AxError::InvalidInput);
         }
         _ => {
             return Err(AxError::from(LinuxError::EAFNOSUPPORT));
@@ -71,11 +74,6 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxResult
     debug!("sys_bind <= fd: {fd}, addr: {addr:?}");
 
     if let SocketAddrEx::Ip(SocketAddr::V4(addr_v4)) = &addr {
-        let euid = current().as_thread().proc_data.ids().1;
-        if euid != 0 && addr_v4.port() < 1024 {
-            return Err(AxError::from(LinuxError::EACCES));
-        }
-
         let ip = *addr_v4.ip();
         if !ip.is_unspecified() && !ip.is_loopback() && ip != Ipv4Addr::new(10, 0, 2, 15) {
             return Err(AxError::from(LinuxError::EADDRNOTAVAIL));
@@ -88,7 +86,15 @@ pub fn sys_bind(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxResult
 }
 
 pub fn sys_connect(fd: i32, addr: UserConstPtr<sockaddr>, addrlen: u32) -> AxResult<isize> {
-    let addr = SocketAddrEx::read_from_user(addr, addrlen)?;
+    let addr = match SocketAddrEx::read_from_user(addr, addrlen)? {
+        SocketAddrEx::Ip(SocketAddr::V4(addr_v4)) if addr_v4.ip().is_unspecified() => {
+            SocketAddrEx::Ip(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::LOCALHOST,
+                addr_v4.port(),
+            )))
+        }
+        addr => addr,
+    };
     debug!("sys_connect <= fd: {fd}, addr: {addr:?}");
 
     Socket::from_fd(fd)?.connect(addr).map_err(|e| {
@@ -172,7 +178,24 @@ pub fn sys_socketpair(
     let ty = raw_ty & 0xFF;
 
     if domain != AF_UNIX {
-        return Err(AxError::from(LinuxError::EAFNOSUPPORT));
+        if domain != AF_INET {
+            return Err(AxError::from(LinuxError::EAFNOSUPPORT));
+        }
+        return match (ty, proto) {
+            (linux_raw_sys::net::SOCK_RAW, _) => {
+                Err(AxError::from(LinuxError::EPROTONOSUPPORT))
+            }
+            (SOCK_DGRAM, x) if x == IPPROTO_UDP as u32 => {
+                Err(AxError::OperationNotSupported)
+            }
+            (SOCK_STREAM, x) if x == IPPROTO_TCP as u32 => {
+                Err(AxError::OperationNotSupported)
+            }
+            (SOCK_DGRAM | SOCK_STREAM, _) => {
+                Err(AxError::from(LinuxError::EPROTONOSUPPORT))
+            }
+            _ => Err(AxError::InvalidInput),
+        };
     }
 
     let pid = current().as_thread().proc_data.proc.pid();
