@@ -265,7 +265,7 @@ pub fn sys_reboot(_magic1: i32, _magic2: i32, _cmd: u32, _arg: *const c_char) ->
     debug!("sys_reboot <= cmd: {_cmd}");
     // Only allow reboot if privileged; otherwise EPERM.
     // We don't actually reboot — just return success for privileged callers.
-    if !current().as_thread().proc_data.ids().0 == 0 {
+    if axtask::current().as_thread().proc_data.ids().0 != 0 {
         return Err(AxError::OperationNotPermitted);
     }
     Ok(0)
