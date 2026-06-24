@@ -710,6 +710,7 @@ pub fn handle_syscall(uctx: &mut UserContext) {
         Sysno::uname => sys_uname(uctx.arg0() as _),
         Sysno::sysinfo => sys_sysinfo(uctx.arg0() as _),
         Sysno::syslog => sys_syslog(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::reboot => sys_reboot(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _, uctx.arg3() as _),
         Sysno::ptrace => sys_ptrace(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2(), uctx.arg3()),
         Sysno::sethostname => sys_sethostname(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::setdomainname => sys_setdomainname(uctx.arg0() as _, uctx.arg1() as _),
