@@ -24,7 +24,7 @@ use crate::{
         check_permission, check_writable_filesystem, clear_setgid_if_not_in_group,
         creation_metadata, do_getxattr, do_listxattr, do_removexattr, do_setxattr,
         get_file_like, get_inode_flags, is_directory_deleted, mark_directory_deleted, remove_inode_flags,
-        remove_xattr_map, resolve_at, resolve_parent_existing, set_inode_flags,
+        remove_xattr_map, resolve_at, set_inode_flags,
         with_fs, with_fs_at,
         FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, Socket,
     },
@@ -432,11 +432,10 @@ pub fn sys_unlinkat(dirfd: i32, path: *const c_char, flags: usize) -> AxResult<i
             remove_inode_flags(&entry);
         } else {
             check_path_search(fs, &path, credentials)?;
-            let (parent, _) = resolve_parent_existing(fs, &path)?;
+            let entry = fs.resolve_no_follow(path.as_str())?;
+            let parent = entry.parent().ok_or(AxError::ResourceBusy)?;
             check_permission(&parent, credentials, AccessMode::WRITE | AccessMode::EXEC)?;
             check_writable_filesystem(&parent)?;
-
-            let entry = fs.resolve_no_follow(path.as_str())?;
             check_not_immutable(&entry)?;
             check_not_append_only(&entry)?;
             check_sticky_removal(&parent, &entry, credentials)?;
