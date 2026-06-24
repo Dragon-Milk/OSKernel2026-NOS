@@ -40,6 +40,7 @@ reasonix.toml
 # target
 kernel-rv
 kernel-la
+src/init/env.rs
 
 # unknown
 src/make/sdcard-la.img:Zone.Identifier

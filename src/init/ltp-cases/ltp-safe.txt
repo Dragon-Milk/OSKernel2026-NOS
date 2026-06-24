@@ -58,6 +58,12 @@ creat05
 creat06
 creat08
 creat09
+diotest1
+diotest2
+diotest3
+diotest4
+diotest5
+diotest6
 dup01
 dup02
 dup03
@@ -196,6 +202,10 @@ fstatfs02_64
 fsync01
 fsync02
 fsync03
+ftest02
+ftest04
+ftest06
+ftest08
 ftruncate01
 ftruncate01_64
 ftruncate03
@@ -276,6 +286,7 @@ kill10
 kill11
 kill12
 leapsec01
+lftest
 lgetxattr01
 lgetxattr02
 link02
@@ -355,6 +366,8 @@ msync03
 munmap01
 munmap02
 munmap03
+name_to_handle_at01
+name_to_handle_at02
 nanosleep02
 nanosleep04
 newuname01
@@ -371,6 +384,8 @@ open08
 open09
 open10
 open11
+open_by_handle_at01
+open_by_handle_at02
 openat01
 pathconf01
 pathconf02
@@ -651,6 +666,7 @@ stime01
 stime02
 symlink02
 symlink04
+tee02
 tgkill01
 tgkill02
 tgkill03
@@ -695,6 +711,7 @@ utsname02
 utsname03
 utsname04
 vfork02
+vmsplice02
 wait01
 wait02
 wait401
