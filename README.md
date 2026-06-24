@@ -2,22 +2,13 @@
 
 基于 [StarryOS](https://github.com/Starry-OS/StarryOS) 开发的 OS ，遵循相关开源协议（详见 reference）
 
-## 性能分析模式
+## 构建入口
 
-提交版仍使用默认构建，不会输出性能统计：
+提交版使用默认构建：
 
 ```bash
 make all
 ```
-
-本地耗时分析使用：
-
-```bash
-make perf-rv DISK_IMG=/home/rippor/img/sdcard-rv.img
-make perf-la DISK_IMG=/home/rippor/img/sdcard-la.img
-```
-
-`perf-rv/perf-la` 会自动开启 `perf-profile`、`LOG=trace` 和 `TEST_PROFILE=perf`，测试结束后输出 PERF 汇总；不要用于提交评测。
 
 ## 项目结构
 

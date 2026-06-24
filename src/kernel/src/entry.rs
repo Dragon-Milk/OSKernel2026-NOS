@@ -38,8 +38,6 @@ use crate::{
 /// 目前只等待 init task 退出，没有等待所有子进程退出。
 /// 如果 init 派生了后台进程，文件系统清理可能早于所有进程结束。
 pub fn init(cmdlines: &[&[&str]], envs: &[&str]) {
-    crate::perf::perf_prepare_run();
-
     // step0: 挂载伪文件系统
     pseudofs::mount_all().expect("Failed to mount pseudofs");
     spawn_alarm_task();
@@ -120,7 +118,6 @@ pub fn init(cmdlines: &[&[&str]], envs: &[&str]) {
     // TODO: wait for all processes to finish
     let exit_code = task.join();
     info!("Init process exited with code: {exit_code:?}");
-    crate::perf::perf_print_summary();
 
     // step12: init 退出后卸载所有文件系统并 flush rootfs。
     let cx = FS_CONTEXT.lock();

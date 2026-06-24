@@ -23,7 +23,6 @@ pub mod entry;
 mod config;
 mod file;
 mod mm;
-mod perf;
 mod pseudofs;
 mod syscall;
 mod task;

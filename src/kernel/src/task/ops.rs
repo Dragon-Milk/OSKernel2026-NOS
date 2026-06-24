@@ -290,7 +290,6 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
 
     let process = &thr.proc_data.proc;
     if process.exit_thread(curr.id().as_u64() as Pid, exit_code) {
-        crate::perf::perf_end_process_case(process.pid() as u64);
         if group_exit && !process.is_group_exited() {
             process.group_exit();
         }

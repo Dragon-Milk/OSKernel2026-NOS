@@ -23,9 +23,6 @@ include!("env.rs");
 fn main() {
     let envs = [
         TEST_PROFILE_ENV,
-        LTP_CATEGORY_ENV,
-        LTP_BATCH_ENV,
-        LTP_LIBC_ENV,
         LTP_TIMEOUT_ENV,
         LTP_CASE_LIST_ENV,
     ];

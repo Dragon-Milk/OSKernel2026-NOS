@@ -14,9 +14,6 @@ export VSOCK := n
 export MEM := 1G
 export ICOUNT := n
 export TEST_PROFILE ?= full-safe
-export LTP_CATEGORY ?= process
-export LTP_BATCH ?= all
-export LTP_LIBC ?= both
 export LTP_CASE_LIST ?=
 
 # Generated Options
@@ -31,11 +28,6 @@ export APP_FEATURES := qemu
 
 ifeq ($(MEMTRACK), y)
 	APP_FEATURES += memtrack
-endif
-
-ifeq ($(TEST_PROFILE), perf)
-	LOG := trace
-	APP_FEATURES += perf-profile
 endif
 
 default: build
@@ -87,9 +79,6 @@ clean:
 build run debug disasm: defconfig
 	@{ \
 		printf 'pub const TEST_PROFILE_ENV: &str = r###"TEST_PROFILE=%s"###;\n' "$(TEST_PROFILE)"; \
-		printf 'pub const LTP_CATEGORY_ENV: &str = r###"LTP_CATEGORY=%s"###;\n' "$(LTP_CATEGORY)"; \
-		printf 'pub const LTP_BATCH_ENV: &str = r###"LTP_BATCH=%s"###;\n' "$(LTP_BATCH)"; \
-		printf 'pub const LTP_LIBC_ENV: &str = r###"LTP_LIBC=%s"###;\n' "$(LTP_LIBC)"; \
 		printf 'pub const LTP_TIMEOUT_ENV: &str = r###"LTP_TIMEOUT=%s"###;\n' "$(LTP_TIMEOUT)"; \
 		printf 'pub const LTP_CASE_LIST_ENV: &str = r###"LTP_CASE_LIST=%s"###;\n' "$(LTP_CASE_LIST)"; \
 	} > init/env.rs.tmp
@@ -111,13 +100,7 @@ rv:
 la:
 	$(MAKE) ARCH=loongarch64 OUT_CONFIG=$(LA_OUT_CONFIG) run
 
-perf-rv:
-	$(MAKE) ARCH=riscv64 OUT_CONFIG=$(RV_OUT_CONFIG) TEST_PROFILE=perf run
-
-perf-la:
-	$(MAKE) ARCH=loongarch64 OUT_CONFIG=$(LA_OUT_CONFIG) TEST_PROFILE=perf run
-
 vf2:
 	$(MAKE) ARCH=riscv64 APP_FEATURES=vf2 MYPLAT=axplat-riscv64-visionfive2 BUS=mmio build
 
-.PHONY: all kernel-rv kernel-la build run justrun debug disasm clean perf-rv perf-la
+.PHONY: all kernel-rv kernel-la build run justrun debug disasm clean

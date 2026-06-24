@@ -12,8 +12,8 @@ export CARGO_NET_OFFLINE := true
 
 # Shared flags forwarded to inner src/ builds.
 # $(MAKE) inherits environment variables and MAKEFLAGS automatically,
-# so TEST_PROFILE, LTP_CATEGORY, LTP_BATCH, LTP_LIBC, LTP_TIMEOUT,
-# LTP_CASE_LIST, FULL_SAFE_SKIP_WASTE, NS_DURATION flow through without extra work.
+# so TEST_PROFILE, LTP_CASE_LIST, LTP_TIMEOUT, FULL_SAFE_SKIP_WASTE,
+# NS_DURATION flow through without extra work.
 SRC_MAKE_ARGS := A=$(SRC_DIR) TARGET_DIR=$(SRC_DIR)/target
 
 all: prepare-vendor kernel-rv kernel-la
@@ -50,12 +50,6 @@ kernel-la: prepare-vendor
 run:
 	@$(MAKE) -C $(SRC_DIR) $(SRC_MAKE_ARGS) OUT_CONFIG=$(RUN_OUT_CONFIG) $@
 
-perf-rv:
-	@$(MAKE) -C $(SRC_DIR) $(SRC_MAKE_ARGS) OUT_CONFIG=$(RV_OUT_CONFIG) ARCH=riscv64 TEST_PROFILE=perf run
-
-perf-la:
-	@$(MAKE) -C $(SRC_DIR) $(SRC_MAKE_ARGS) OUT_CONFIG=$(LA_OUT_CONFIG) ARCH=loongarch64 TEST_PROFILE=perf run
-
 # clean forwards through src/Makefile so src/make is reached consistently
 # and src-level config/artifact cleanup also runs.
 clean:
@@ -65,4 +59,4 @@ clean:
 		$(SRC_DIR)/.axconfig-riscv64.toml $(SRC_DIR)/.axconfig-riscv64.old.toml \
 		$(SRC_DIR)/.axconfig-loongarch64.toml $(SRC_DIR)/.axconfig-loongarch64.old.toml
 
-.PHONY: all prepare-vendor kernel-rv kernel-la run clean perf-rv perf-la
+.PHONY: all prepare-vendor kernel-rv kernel-la run clean

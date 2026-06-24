@@ -119,7 +119,6 @@ pub fn sys_write(fd: i32, buf: *mut u8, len: usize) -> AxResult<isize> {
         }
     }
     let written = f.write(&mut VmBytes::new(buf, len))?;
-    crate::perf::perf_observe_user_write(fd, buf, written);
     Ok(written as _)
 }
 
@@ -136,7 +135,6 @@ pub fn sys_writev(fd: i32, iov: *const IoVec, iovcnt: usize) -> AxResult<isize> 
     let iov_buf = IoVectorBuf::new(iov, iovcnt)?;
     iov_buf.validate_readable()?;
     let written = f.write(&mut iov_buf.into_io())?;
-    crate::perf::perf_observe_user_writev(fd, iov, iovcnt, written);
     Ok(written as _)
 }
 

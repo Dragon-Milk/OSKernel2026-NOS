@@ -1,9 +1,0 @@
-prctl05
-prctl08
-pth_str02
-rt_sigaction01
-rt_sigaction02
-rt_sigaction03
-rt_sigprocmask01
-rt_sigprocmask02
-rt_sigsuspend01
