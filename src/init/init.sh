@@ -453,6 +453,15 @@ run_full_safe_non_ltp_tests() {
                     ;;
             esac
 
+            # Defer cyclictest to after LTP to reduce hackbench/cyclictest
+            # contamination risk on high-score tests.
+            case "$testcase" in
+                /glibc/cyclictest_testcode.sh|/musl/cyclictest_testcode.sh)
+                    echo "[full-safe] defer cyclictest to after LTP: $testcase"
+                    continue
+                    ;;
+            esac
+
             if [ "$FULL_SAFE_SKIP_WASTE" = "1" ]; then
                 case "$testcase" in
                     /glibc/unixbench_testcode.sh)
@@ -1071,6 +1080,7 @@ case "$TEST_PROFILE" in
         prepare_stable_test_env
         run_full_safe_non_ltp_tests
         run_ltp_safe_tests
+        run_cyclictest_tests
         ;;
     *)
         echo "Unknown TEST_PROFILE=$TEST_PROFILE; using stable profile."
