@@ -407,8 +407,8 @@ run_ltp_dir() {
             [ -f "$file" ] || continue
 
             echo "RUN LTP CASE $name"
-            "$file"
-            ret=$?
+            ret=0
+            "$file" || ret=$?
             echo "FAIL LTP CASE $name : $ret"
         done
 
@@ -510,12 +510,12 @@ run_ltp_one_batch_libc() {
 
         echo "RUN LTP CASE $name"
 
+        ret=0
         if [ -n "$bb" ]; then
-            "$bb" timeout "$case_timeout" "$file"
+            "$bb" timeout "$case_timeout" "$file" || ret=$?
         else
-            "$file"
+            "$file" || ret=$?
         fi
-        ret=$?
         echo "FAIL LTP CASE $name : $ret"
     done
 
@@ -634,12 +634,12 @@ run_ltp_safe_libc() {
 
         echo "RUN LTP CASE $name"
 
+        ret=0
         if [ -n "$bb" ]; then
-            "$bb" timeout "$case_timeout" "$file"
+            "$bb" timeout "$case_timeout" "$file" || ret=$?
         else
-            "$file"
+            "$file" || ret=$?
         fi
-        ret=$?
         echo "FAIL LTP CASE $name : $ret"
     done
 

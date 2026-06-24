@@ -57,7 +57,6 @@ chroot03
 chroot04
 cpuacct.sh
 cpuacct_task
-cpuctl_def_task01
 cpuctl_def_task02
 cpuctl_def_task03
 cpuctl_def_task04
