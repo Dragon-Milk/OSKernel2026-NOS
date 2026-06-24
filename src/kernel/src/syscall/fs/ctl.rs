@@ -175,11 +175,25 @@ pub fn sys_chroot(path: *const c_char) -> AxResult<isize> {
     let path = vm_load_string(path)?;
     debug!("sys_chroot <= path: {path}");
 
+    let credentials = VfsCredentials::effective();
+
     let mut fs = FS_CONTEXT.lock();
+    check_path_search(&fs, &path, credentials)?;
     let loc = fs.resolve(path)?;
     if loc.node_type() != NodeType::Directory {
         return Err(AxError::NotADirectory);
     }
+    check_permission(&loc, credentials, AccessMode::EXEC)?;
+
+    if !credentials.is_privileged()
+        || !current()
+            .as_thread()
+            .proc_data
+            .has_capability(CAP_SYS_CHROOT)
+    {
+        return Err(AxError::OperationNotPermitted);
+    }
+
     *fs = FsContext::new(loc);
     Ok(0)
 }

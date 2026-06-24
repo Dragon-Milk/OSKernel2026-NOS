@@ -1,3 +1,3 @@
 pub const TEST_PROFILE_ENV: &str = r###"TEST_PROFILE=ltp-safe"###;
-pub const LTP_TIMEOUT_ENV: &str = r###"LTP_TIMEOUT=45"###;
-pub const LTP_CASE_LIST_ENV: &str = r###"LTP_CASE_LIST=accept02 bind02 gethostbyname_r01 recvmmsg01 send02 sendmmsg01 sendmmsg02 setsockopt04 sockioctl01"###;
+pub const LTP_TIMEOUT_ENV: &str = r###"LTP_TIMEOUT=90"###;
+pub const LTP_CASE_LIST_ENV: &str = r###"LTP_CASE_LIST=capget01 capget02 capset01 capset02 capset03 capset04 chroot01 chroot02 chroot03 chroot04 data_space getpagesize01 getrandom01 getrandom02 getrandom03 getrandom04 getrandom05 mem02 memfd_create02 mesgq_nstest mlock01 mlock03 mlockall01 mmapstress01 mmapstress04 page01 page02 process_vm01 reboot01 sbrk02 set_robust_list01 stack_space stream01 stream02 stream03 stream04 stream05 syscall01 sysconf01 sysinfo01 sysinfo02"###;

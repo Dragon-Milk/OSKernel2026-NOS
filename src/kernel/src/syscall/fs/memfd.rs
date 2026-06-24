@@ -1,32 +1,31 @@
-use alloc::format;
+use alloc::string::String;
 use core::ffi::c_char;
 
 use axerrno::{AxError, AxResult};
-use axfs::{FS_CONTEXT, OpenOptions};
-use linux_raw_sys::general::MFD_CLOEXEC;
+use linux_raw_sys::general::{MFD_ALLOW_SEALING, MFD_CLOEXEC};
 
 use crate::{
-    file::{File, FileLike},
+    file::{FileLike, MemFd},
     mm::UserConstPtr,
 };
 
-// TODO: correct memfd implementation
+const MEMFD_NAME_MAX: usize = 249;
+const SUPPORTED_MEMFD_FLAGS: u32 = MFD_CLOEXEC | MFD_ALLOW_SEALING;
 
-pub fn sys_memfd_create(_name: UserConstPtr<c_char>, flags: u32) -> AxResult<isize> {
-    // This is cursed
-    for id in 0..0xffff {
-        let name = format!("/tmp/memfd-{id:04x}");
-        let fs = FS_CONTEXT.lock().clone();
-        if fs.resolve(&name).is_err() {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(&fs, &name)?
-                .into_file()?;
-            let cloexec = flags & MFD_CLOEXEC != 0;
-            return File::new(file).add_to_fd_table(cloexec).map(|fd| fd as _);
-        }
+pub fn sys_memfd_create(name: UserConstPtr<c_char>, flags: u32) -> AxResult<isize> {
+    if flags & !SUPPORTED_MEMFD_FLAGS != 0 {
+        return Err(AxError::InvalidInput);
     }
-    Err(AxError::TooManyOpenFiles)
+    let name = name.get_as_null_terminated()?;
+    if name.len() > MEMFD_NAME_MAX {
+        return Err(AxError::InvalidInput);
+    }
+    let allow_sealing = flags & MFD_ALLOW_SEALING != 0;
+    let cloexec = flags & MFD_CLOEXEC != 0;
+    let name_bytes =
+        unsafe { core::slice::from_raw_parts(name.as_ptr().cast::<u8>(), name.len()) };
+    let name = String::from_utf8_lossy(name_bytes).into_owned();
+    MemFd::new(name, allow_sealing)
+        .add_to_fd_table(cloexec)
+        .map(|fd| fd as _)
 }

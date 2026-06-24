@@ -525,6 +525,22 @@ pub fn handle_syscall(uctx: &mut UserContext) {
         Sysno::mlockall => sys_mlockall(uctx.arg0() as _),
         Sysno::munlock => sys_munlock(uctx.arg0(), uctx.arg1() as _),
         Sysno::munlockall => sys_munlockall(),
+        Sysno::process_vm_readv => sys_process_vm_readv(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4() as _,
+            uctx.arg5() as _,
+        ),
+        Sysno::process_vm_writev => sys_process_vm_writev(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4() as _,
+            uctx.arg5() as _,
+        ),
 
         // task info
         Sysno::getpid => sys_getpid(),
@@ -723,6 +739,12 @@ pub fn handle_syscall(uctx: &mut UserContext) {
         Sysno::uname => sys_uname(uctx.arg0() as _),
         Sysno::sysinfo => sys_sysinfo(uctx.arg0() as _),
         Sysno::syslog => sys_syslog(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2() as _),
+        Sysno::reboot => sys_reboot(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+        ),
         Sysno::ptrace => sys_ptrace(uctx.arg0() as _, uctx.arg1() as _, uctx.arg2(), uctx.arg3()),
         Sysno::sethostname => sys_sethostname(uctx.arg0() as _, uctx.arg1() as _),
         Sysno::setdomainname => sys_setdomainname(uctx.arg0() as _, uctx.arg1() as _),

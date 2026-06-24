@@ -408,6 +408,7 @@ pub struct Capabilities {
     pub effective: u32,
     pub permitted: u32,
     pub inheritable: u32,
+    pub bounding: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -428,6 +429,7 @@ impl Default for Capabilities {
             effective: u32::MAX,
             permitted: u32::MAX,
             inheritable: u32::MAX,
+            bounding: u32::MAX,
         }
     }
 }

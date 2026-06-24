@@ -188,7 +188,7 @@ pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> AxResult<isize> {
     if len == 0 {
         return Ok(0);
     }
-    let flags = GetRandomFlags::from_bits_retain(flags);
+    let flags = GetRandomFlags::from_bits(flags).ok_or(AxError::InvalidInput)?;
 
     debug!("sys_getrandom <= buf: {buf:p}, len: {len}, flags: {flags:?}");
 
@@ -259,6 +259,14 @@ fn read_uts_name(name: *const c_char, len: usize) -> AxResult<[c_char; UTS_NAME_
 
 pub fn sys_ptrace(_request: i32, _pid: i32, _addr: usize, _data: usize) -> AxResult<isize> {
     Err(AxError::Unsupported)
+}
+
+pub fn sys_reboot(_magic1: i32, _magic2: i32, _cmd: u32, _arg: *const c_char) -> AxResult<isize> {
+    debug!("sys_reboot <= cmd: {_cmd}");
+    if axtask::current().as_thread().proc_data.ids().0 != 0 {
+        return Err(AxError::OperationNotPermitted);
+    }
+    Ok(0)
 }
 
 pub fn sys_seccomp(_op: u32, _flags: u32, _args: *const ()) -> AxResult<isize> {

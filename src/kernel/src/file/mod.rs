@@ -2,6 +2,7 @@ pub mod epoll;
 pub mod event;
 pub mod flock;
 mod fs;
+mod memfd;
 mod net;
 mod pidfd;
 mod pipe;
@@ -32,8 +33,10 @@ pub use self::{
         AccessMode, Directory, File, ResolveAtResult, VfsCredentials,
         check_parent_permission, check_path_len, check_path_search, check_path_search_stat,
         check_permission, check_writable_filesystem, clear_setgid_if_not_in_group,
-        creation_metadata, resolve_at, mark_directory_deleted, is_directory_deleted, with_fs, with_fs_at,
+        creation_metadata, is_directory_deleted, mark_directory_deleted, resolve_at,
+        resolve_parent_existing, with_fs, with_fs_at,
     },
+    memfd::MemFd,
     net::Socket,
     pidfd::PidFd,
     pipe::{NamedPipe, Pipe, PIPE_MAX_SIZE},

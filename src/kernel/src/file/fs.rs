@@ -375,6 +375,15 @@ pub fn check_parent_permission(
     check_permission(&parent, credentials, requested)
 }
 
+pub fn resolve_parent_existing<'a>(
+    fs: &FsContext,
+    path: &'a str,
+) -> AxResult<(Location, Cow<'a, str>)> {
+    let path = Path::new(path);
+    fs.resolve_no_follow(path)?;
+    Ok(fs.resolve_parent(path)?)
+}
+
 pub enum ResolveAtResult {
     File(Location),
     Other(Arc<dyn FileLike>),
