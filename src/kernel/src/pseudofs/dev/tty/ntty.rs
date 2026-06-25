@@ -1,6 +1,7 @@
 use alloc::{boxed::Box, sync::Arc};
 
 use axtask::future::register_irq_waker;
+use kspin::SpinNoIrq;
 use lazy_static::lazy_static;
 
 use super::{
@@ -9,6 +10,8 @@ use super::{
 };
 
 pub type NTtyDriver = Tty<Console, Console>;
+
+static CONSOLE_WRITE_LOCK: SpinNoIrq<()> = SpinNoIrq::new(());
 
 #[derive(Clone, Copy)]
 pub struct Console;
@@ -19,6 +22,7 @@ impl TtyRead for Console {
 }
 impl TtyWrite for Console {
     fn write(&self, buf: &[u8]) {
+        let _guard = CONSOLE_WRITE_LOCK.lock();
         axhal::console::write_bytes(buf);
     }
 }
