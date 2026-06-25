@@ -14,7 +14,7 @@ export CARGO_NET_OFFLINE := true
 # $(MAKE) inherits environment variables and MAKEFLAGS automatically,
 # so TEST_PROFILE, LTP_CASE_LIST, LTP_TIMEOUT, FULL_SAFE_SKIP_WASTE,
 # NS_DURATION flow through without extra work.
-SRC_MAKE_ARGS := A=$(SRC_DIR) TARGET_DIR=$(SRC_DIR)/target
+SRC_MAKE_ARGS := A=$(SRC_DIR) APP=$(SRC_DIR) TARGET_DIR=$(SRC_DIR)/target
 
 all: prepare-vendor kernel-rv kernel-la
 	@rm -rf $(SRC_DIR)/target

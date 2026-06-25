@@ -25,6 +25,7 @@ export LA_OUT_CONFIG ?= $(CURDIR)/.axconfig-loongarch64.toml
 export NO_AXSTD := y
 export AX_LIB := axfeat
 export APP_FEATURES := qemu
+INNER_MAKE_ARGS := A=$(CURDIR) APP=$(CURDIR) TARGET_DIR=$(TARGET_DIR) OUT_CONFIG=$(OUT_CONFIG)
 
 ifeq ($(MEMTRACK), y)
 	APP_FEATURES += memtrack
@@ -64,11 +65,11 @@ prepare-vendor:
 	fi
 
 kernel-rv: prepare-vendor
-	@$(MAKE) ARCH=riscv64 BUS=mmio LD_SCRIPT=$(RV_LD_SCRIPT) OUT_CONFIG=$(RV_OUT_CONFIG) build
+	@$(MAKE) ARCH=riscv64 BUS=mmio LD_SCRIPT=$(RV_LD_SCRIPT) OUT_CONFIG=$(RV_OUT_CONFIG) A=$(CURDIR) APP=$(CURDIR) TARGET_DIR=$(TARGET_DIR) build
 	@cp $(RV_ELF) $@
 
 kernel-la: prepare-vendor
-	@$(MAKE) ARCH=loongarch64 BUS=pci LD_SCRIPT=$(LA_LD_SCRIPT) OUT_CONFIG=$(LA_OUT_CONFIG) build
+	@$(MAKE) ARCH=loongarch64 BUS=pci LD_SCRIPT=$(LA_LD_SCRIPT) OUT_CONFIG=$(LA_OUT_CONFIG) A=$(CURDIR) APP=$(CURDIR) TARGET_DIR=$(TARGET_DIR) build
 	@cp $(LA_ELF) $@
 
 ROOTFS_URL = https://github.com/Starry-OS/rootfs/releases/download/20260214
@@ -87,10 +88,10 @@ img:
 	@$(MAKE) --no-print-directory rootfs
 
 defconfig justrun: prepare-vendor
-	@$(MAKE) -C make $@
+	@$(MAKE) -C make $(INNER_MAKE_ARGS) $@
 
 clean:
-	@$(MAKE) -C make $@
+	@$(MAKE) -C make $(INNER_MAKE_ARGS) $@
 	@rm -f kernel-rv kernel-la \
 		$(RV_OUT_CONFIG) $(CURDIR)/.axconfig-riscv64.old.toml \
 		$(LA_OUT_CONFIG) $(CURDIR)/.axconfig-loongarch64.old.toml
@@ -107,7 +108,7 @@ build run debug disasm: defconfig
 		mv init/env.rs.tmp init/env.rs; \
 		touch init/main.rs; \
 	fi
-	@$(MAKE) -C make $@
+	@$(MAKE) -C make $(INNER_MAKE_ARGS) $@
 
 ci-test:
 	./scripts/ci-test.py $(ARCH)
