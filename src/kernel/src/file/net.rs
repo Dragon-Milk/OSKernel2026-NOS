@@ -3,7 +3,7 @@ use core::{ffi::c_int, ops::Deref, task::Context};
 
 use axerrno::{AxError, AxResult};
 use axnet::{
-    CMsgData, RecvOptions, SendOptions, Socket as SocketInner, SocketAddrEx, SocketOps,
+    CMsgData, RecvOptions, SendFlags, SendOptions, Socket as SocketInner, SocketAddrEx, SocketOps,
     options::{Configurable, GetSocketOption, SetSocketOption},
 };
 use axpoll::{IoEvents, Pollable};
@@ -46,6 +46,39 @@ impl Socket {
 
     pub fn take_pending_send(&self) -> Option<PendingSend> {
         self.1.lock().take()
+    }
+
+    pub fn flush_pending_send(&self) -> AxResult<usize> {
+        let Some(pending) = self.take_pending_send() else {
+            return Ok(0);
+        };
+
+        let mut data = pending.data.as_slice();
+        self.send(
+            &mut data,
+            SendOptions {
+                to: pending.to,
+                flags: SendFlags::default(),
+                cmsg: pending.cmsg,
+            },
+        )
+    }
+
+    fn flush_pending_send_best_effort(&self) {
+        let was_nonblocking = self.nonblocking();
+        if !was_nonblocking {
+            let _ = self.set_nonblocking(true);
+        }
+        let _ = self.flush_pending_send();
+        if !was_nonblocking {
+            let _ = self.set_nonblocking(false);
+        }
+    }
+}
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        self.flush_pending_send_best_effort();
     }
 }
 

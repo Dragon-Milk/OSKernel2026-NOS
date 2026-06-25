@@ -1,3 +1,5 @@
+use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
 use axerrno::{AxError, AxResult, LinuxError};
 #[cfg(feature = "vsock")]
 use axnet::vsock::{VsockSocket, VsockStreamTransport};
@@ -7,7 +9,6 @@ use axnet::{
     udp::UdpSocket,
     unix::{DgramTransport, StreamTransport, UnixSocket},
 };
-use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use axtask::current;
 use linux_raw_sys::{
     general::{O_CLOEXEC, O_NONBLOCK},
@@ -173,6 +174,9 @@ pub fn sys_shutdown(fd: i32, how: u32) -> AxResult<isize> {
         SHUT_RDWR => Shutdown::Both,
         _ => return Err(AxError::InvalidInput),
     };
+    if how.has_write() {
+        socket.flush_pending_send()?;
+    }
     socket.shutdown(how).map(|_| 0)
 }
 
@@ -190,18 +194,10 @@ pub fn sys_socketpair(
             return Err(AxError::from(LinuxError::EAFNOSUPPORT));
         }
         return match (ty, proto) {
-            (linux_raw_sys::net::SOCK_RAW, _) => {
-                Err(AxError::from(LinuxError::EPROTONOSUPPORT))
-            }
-            (SOCK_DGRAM, x) if x == IPPROTO_UDP as u32 => {
-                Err(AxError::OperationNotSupported)
-            }
-            (SOCK_STREAM, x) if x == IPPROTO_TCP as u32 => {
-                Err(AxError::OperationNotSupported)
-            }
-            (SOCK_DGRAM | SOCK_STREAM, _) => {
-                Err(AxError::from(LinuxError::EPROTONOSUPPORT))
-            }
+            (linux_raw_sys::net::SOCK_RAW, _) => Err(AxError::from(LinuxError::EPROTONOSUPPORT)),
+            (SOCK_DGRAM, x) if x == IPPROTO_UDP as u32 => Err(AxError::OperationNotSupported),
+            (SOCK_STREAM, x) if x == IPPROTO_TCP as u32 => Err(AxError::OperationNotSupported),
+            (SOCK_DGRAM | SOCK_STREAM, _) => Err(AxError::from(LinuxError::EPROTONOSUPPORT)),
             _ => Err(AxError::InvalidInput),
         };
     }
