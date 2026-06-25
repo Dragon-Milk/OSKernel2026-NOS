@@ -48,8 +48,9 @@ fn send_impl(
         return Err(AxError::OperationNotSupported);
     }
     let is_tcp = matches!(&socket.0, SocketInner::Tcp(_));
+    let is_udp = matches!(&socket.0, SocketInner::Udp(_));
 
-    if flags & MSG_MORE != 0 {
+    if flags & MSG_MORE != 0 && is_udp {
         let data = read_send_data(src)?;
         let sent = data.len();
         socket.append_pending_send(data, addr, cmsg);
@@ -64,7 +65,7 @@ fn send_impl(
             pending.to = addr;
         }
         pending.cmsg.extend(cmsg);
-        if pending.data.len() > 65_507 && matches!(&socket.0, SocketInner::Udp(_)) {
+        if pending.data.len() > 65_507 && is_udp {
             return Err(LinuxError::EMSGSIZE.into());
         }
 
