@@ -24,8 +24,8 @@ struct ConsoleIfImpl;
 impl ConsoleIf for ConsoleIfImpl {
     /// Writes bytes to the console from input u8 slice.
     fn write_bytes(bytes: &[u8]) {
+        let mut uart = UART.lock();
         for &c in bytes {
-            let mut uart = UART.lock();
             match c {
                 b'\n' => {
                     uart.send_raw(b'\r');
