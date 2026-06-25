@@ -24,7 +24,9 @@ all: prepare-vendor kernel-rv kernel-la
 
 prepare-vendor:
 	@mkdir -p $(SRC_DIR)/.cargo
-	@if [ -f $(SRC_DIR)/cargo-config.toml ] && [ ! -f $(SRC_DIR)/.cargo/config.toml ]; then \
+	@if [ -f $(SRC_DIR)/cargo-config/config.toml ]; then \
+		cp $(SRC_DIR)/cargo-config/config.toml $(SRC_DIR)/.cargo/config.toml; \
+	elif [ -f $(SRC_DIR)/cargo-config.toml ]; then \
 		cp $(SRC_DIR)/cargo-config.toml $(SRC_DIR)/.cargo/config.toml; \
 	fi
 	@if [ -f $(SRC_DIR)/cargo-config ] && [ ! -f $(SRC_DIR)/.cargo/config ]; then \

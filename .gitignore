@@ -9,6 +9,7 @@
 /kernel-rv
 /kernel-la
 /.cargo
+/src/.cargo/
 /.crates*
 /mnt
 *.swp

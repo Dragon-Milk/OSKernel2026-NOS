@@ -3,6 +3,7 @@ set -u
 
 FAIL=0
 WARN=0
+HAVE_CARGO=0
 
 say() { printf '%s\n' "$*"; }
 ok() { printf '[OK] %s\n' "$*"; }
@@ -107,6 +108,47 @@ print(f"[OK] {label}: vendor checksum 未发现缺失或不匹配文件")
 PY
 }
 
+check_cargo_offline_metadata_tree() {
+    local tree_dir="$1"
+    local label="$2"
+
+    if [ "$HAVE_CARGO" != "1" ]; then
+        warn "$label: 本机缺少 cargo，跳过 cargo offline metadata 检查"
+        return 0
+    fi
+
+    local log="$TMP_ROOT/${label//[^A-Za-z0-9_.-]/_}.cargo-metadata.log"
+    local found=0
+    local bad=0
+
+    for manifest in \
+        "$tree_dir/src/Cargo.toml" \
+        "$tree_dir/src/tools/"*/Cargo.toml
+    do
+        [ -f "$manifest" ] || continue
+        found=1
+
+        say "[cargo metadata] $label: ${manifest#$tree_dir/}"
+
+        if (
+            cd "$(dirname "$manifest")" &&
+            CARGO_NET_OFFLINE=true cargo metadata --offline --format-version 1 --manifest-path "$manifest" >/dev/null
+        ) >"$log" 2>&1; then
+            ok "$label: ${manifest#$tree_dir/} 离线依赖解析通过"
+        else
+            say "[FAIL] $label: ${manifest#$tree_dir/} 离线依赖解析失败"
+            sed -n '1,160p' "$log"
+            bad=1
+        fi
+    done
+
+    if [ "$found" = "0" ]; then
+        warn "$label: 未发现 Cargo.toml，跳过 cargo metadata 检查"
+    fi
+
+    return "$bad"
+}
+
 export_ref_tree() {
     local ref="$1"
     local out="$2"
@@ -163,6 +205,12 @@ say "===== 0. required tools ====="
 need_cmd git
 need_cmd tar
 need_cmd python3
+if command -v cargo >/dev/null 2>&1; then
+    HAVE_CARGO=1
+    ok "cargo 存在"
+else
+    fail "缺少命令：cargo"
+fi
 say
 
 say "===== 1. worktree status ====="
@@ -212,7 +260,7 @@ else
 fi
 say
 
-say "===== 4. worktree vendor checksum ====="
+say "===== 4a. worktree vendor checksum ====="
 check_vendor_tree_dir "$ROOT" "worktree"
 rc=$?
 if [ "$rc" -ne 0 ]; then
@@ -220,7 +268,15 @@ if [ "$rc" -ne 0 ]; then
 fi
 say
 
-say "===== 5. HEAD clean tree vendor checksum ====="
+say "===== 4b. worktree cargo offline metadata ====="
+check_cargo_offline_metadata_tree "$ROOT" "worktree"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    FAIL=$((FAIL + 1))
+fi
+say
+
+say "===== 5a. HEAD clean tree vendor checksum ====="
 HEAD_TREE="$TMP_ROOT/head-tree"
 if export_ref_tree HEAD "$HEAD_TREE"; then
     check_vendor_tree_dir "$HEAD_TREE" "HEAD clean tree"
@@ -230,6 +286,16 @@ if export_ref_tree HEAD "$HEAD_TREE"; then
     fi
 else
     fail "无法从 HEAD 导出 clean tree"
+fi
+say
+
+say "===== 5b. HEAD clean tree cargo offline metadata ====="
+if [ -d "$HEAD_TREE" ]; then
+    check_cargo_offline_metadata_tree "$HEAD_TREE" "HEAD clean tree"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        FAIL=$((FAIL + 1))
+    fi
 fi
 say
 
@@ -287,6 +353,12 @@ if [ -n "$PLATFORM_REF" ]; then
         REF_TREE="$TMP_ROOT/platform-tree"
         if export_ref_tree "$PLATFORM_REF" "$REF_TREE"; then
             check_vendor_tree_dir "$REF_TREE" "$PLATFORM_REF clean tree"
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+                FAIL=$((FAIL + 1))
+            fi
+
+            check_cargo_offline_metadata_tree "$REF_TREE" "$PLATFORM_REF clean tree"
             rc=$?
             if [ "$rc" -ne 0 ]; then
                 FAIL=$((FAIL + 1))

@@ -44,11 +44,30 @@ endif
 
 all: kernel-rv kernel-la
 
-kernel-rv:
+prepare-vendor:
+	@mkdir -p $(CURDIR)/.cargo
+	@if [ -f $(CURDIR)/cargo-config/config.toml ]; then \
+		cp $(CURDIR)/cargo-config/config.toml $(CURDIR)/.cargo/config.toml; \
+	elif [ -f $(CURDIR)/cargo-config.toml ]; then \
+		cp $(CURDIR)/cargo-config.toml $(CURDIR)/.cargo/config.toml; \
+	fi
+	@if [ -f $(CURDIR)/cargo-config ] && [ ! -f $(CURDIR)/.cargo/config ]; then \
+		cp $(CURDIR)/cargo-config $(CURDIR)/.cargo/config; \
+	fi
+	@if [ -d $(CURDIR)/vendor ]; then \
+		find $(CURDIR)/vendor -mindepth 2 -maxdepth 2 -name cargo-checksum.json \
+			-exec sh -c 'dst="$$(dirname "$$1")/.cargo-checksum.json"; [ -f "$$dst" ] || cp "$$1" "$$dst"' sh {} \; ; \
+	fi
+	@if [ -d $(CURDIR)/vendor ]; then \
+		find $(CURDIR)/vendor -mindepth 2 -maxdepth 2 -name cargo-vcs-info.json \
+			-exec sh -c 'dst="$$(dirname "$$1")/.cargo_vcs_info.json"; [ -f "$$dst" ] || cp "$$1" "$$dst"' sh {} \; ; \
+	fi
+
+kernel-rv: prepare-vendor
 	@$(MAKE) ARCH=riscv64 BUS=mmio LD_SCRIPT=$(RV_LD_SCRIPT) OUT_CONFIG=$(RV_OUT_CONFIG) build
 	@cp $(RV_ELF) $@
 
-kernel-la:
+kernel-la: prepare-vendor
 	@$(MAKE) ARCH=loongarch64 BUS=pci LD_SCRIPT=$(LA_LD_SCRIPT) OUT_CONFIG=$(LA_OUT_CONFIG) build
 	@cp $(LA_ELF) $@
 
@@ -67,7 +86,7 @@ img:
 	@echo -e "\033[33mWARN: The 'img' target is deprecated. Please use 'rootfs' instead.\033[0m"
 	@$(MAKE) --no-print-directory rootfs
 
-defconfig justrun:
+defconfig justrun: prepare-vendor
 	@$(MAKE) -C make $@
 
 clean:
@@ -103,4 +122,4 @@ la:
 vf2:
 	$(MAKE) ARCH=riscv64 APP_FEATURES=vf2 MYPLAT=axplat-riscv64-visionfive2 BUS=mmio build
 
-.PHONY: all kernel-rv kernel-la build run justrun debug disasm clean
+.PHONY: all prepare-vendor kernel-rv kernel-la build run justrun debug disasm clean
