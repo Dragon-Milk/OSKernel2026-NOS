@@ -12,7 +12,11 @@ export PATH=$BASE_PATH
 # cyc-all       : run glibc and musl cyclictest only
 # libctest      : run glibc and musl libctest only
 # iozone        : run glibc and musl iozone to verify sys_sync/syncfs
+# iozone-window : run iozone -> iperf -> libcbench for both libc variants
 # lmbench       : run glibc and musl lmbench only
+# busybox       : run glibc and musl busybox only
+# netperf       : run glibc and musl netperf only
+# lua-netperf   : run lua -> netperf for both libc variants
 # ltp-list      : list glibc and musl ltp testcase names only
 # ltp-safe      : run LTP cases from LTP_CASE_LIST, or ltp-safe.txt when unset
 # unixbench     : run glibc and musl unixbench only
@@ -26,14 +30,10 @@ LTP_CASE_LIST=${LTP_CASE_LIST:-}
 LTP_TIMEOUT=${LTP_TIMEOUT:-${LTP_CASE_TIMEOUT:-45}}
 export LTP_TIMEOUT
 FULL_SAFE_SKIP_WASTE=${FULL_SAFE_SKIP_WASTE:-1}
-FULL_SAFE_TEST_TIMEOUT=${FULL_SAFE_TEST_TIMEOUT:-300}
-FULL_SAFE_NETPERF_TIMEOUT=${FULL_SAFE_NETPERF_TIMEOUT:-240}
 echo "[init] TEST_PROFILE=$TEST_PROFILE"
 echo "[init] LTP_TIMEOUT=$LTP_TIMEOUT"
 echo "[init] LTP_CASE_LIST=$LTP_CASE_LIST"
 echo "[init] FULL_SAFE_SKIP_WASTE=$FULL_SAFE_SKIP_WASTE"
-echo "[init] FULL_SAFE_TEST_TIMEOUT=$FULL_SAFE_TEST_TIMEOUT"
-echo "[init] FULL_SAFE_NETPERF_TIMEOUT=$FULL_SAFE_NETPERF_TIMEOUT"
 
 entry_name_exists() {
     file="$1"
@@ -345,61 +345,6 @@ run_test_path() {
     cd /
 }
 
-full_safe_timeout_for() {
-    case "$1" in
-        *netperf_testcode.sh)
-            echo "$FULL_SAFE_NETPERF_TIMEOUT"
-            ;;
-        *)
-            echo "$FULL_SAFE_TEST_TIMEOUT"
-            ;;
-    esac
-}
-
-run_test_path_full_safe() {
-    script="$1"
-
-    [ -f "$script" ] || return
-
-    found=1
-    dir="${script%/*}"
-    name="${script##*/}"
-
-    cd "$dir" || return
-    set_library_path "$dir"
-    echo "run ${dir}/${name}"
-    if skip_ltp_testcase "$name" "$dir"; then
-        cd /
-        return
-    fi
-
-    timeout_secs="$(full_safe_timeout_for "$script")"
-    bb="$(busybox_cmd)"
-    case "$timeout_secs" in
-        ''|0|*[!0-9]*)
-            run_with_shell "./$name"
-            ret=$?
-            ;;
-        *)
-            if [ -n "$bb" ]; then
-                "$bb" timeout "$timeout_secs" "$bb" sh "./$name"
-                ret=$?
-            else
-                run_with_shell "./$name"
-                ret=$?
-            fi
-            ;;
-    esac
-
-    case "$ret" in
-        124|137|143)
-            echo "[full-safe] timeout after ${timeout_secs}s: ${dir}/${name}"
-            ;;
-    esac
-    needs_cleanup "$script" && cleanup_leftovers
-    cd /
-}
-
 prepare_basic_scripts() {
     for dir in /glibc /musl; do
         [ -x "$dir/busybox" ] || continue
@@ -457,7 +402,7 @@ run_full_safe_non_ltp_tests() {
                 esac
             fi
 
-            run_test_path_full_safe "$testcase"
+            run_test_path "$testcase"
         done
     done
 }
@@ -472,6 +417,33 @@ prepare_common_test_env() {
         /musl/busybox chmod +x /musl/basic/run-all.sh /musl/basic/test_* 2>/dev/null || true
         /musl/busybox ln -sf busybox /musl/ls 2>/dev/null || true
     fi
+
+    prepare_storage_commands
+}
+
+prepare_storage_commands() {
+    bb="$(busybox_cmd)"
+    [ -n "$bb" ] || return
+    case "$bb" in
+        ./*) bb="$(pwd)/${bb#./}" ;;
+    esac
+
+    "$bb" mkdir -p /bin 2>/dev/null || true
+
+    for cmd in \
+        sh cp mkdir rm sleep zcat \
+        gzip gunzip tar mv ln ls cat \
+        wc du df touch chmod chown \
+        echo grep basename dirname dd \
+        stat find mknod mount umount \
+        awk sed sort head tail tr cut expr pwd \
+        mktemp seq id diff md5sum \
+        cmp sha256sum xargs uniq env
+    do
+        if [ -x "$bb" ] && ! [ -x "/bin/$cmd" ]; then
+            "$bb" ln -sf "$bb" "/bin/$cmd" 2>/dev/null || true
+        fi
+    done
 }
 
 run_cyclictest_musl_tests() {
@@ -493,15 +465,59 @@ run_libctest_tests() {
 
 run_iozone_tests() {
     found=1
+    prepare_common_test_env
     echo "run iozone tests for sys_sync/syncfs verification"
     run_test_path /glibc/iozone_testcode.sh
     run_test_path /musl/iozone_testcode.sh
 }
 
+run_iozone_window_tests() {
+    found=1
+    prepare_common_test_env
+    for testcase in \
+        /glibc/iozone_testcode.sh \
+        /glibc/iperf_testcode.sh \
+        /glibc/libcbench_testcode.sh \
+        /musl/iozone_testcode.sh \
+        /musl/iperf_testcode.sh \
+        /musl/libcbench_testcode.sh
+    do
+        run_test_path "$testcase"
+    done
+}
+
 run_lmbench_tests() {
     found=1
+    prepare_common_test_env
     run_test_path /glibc/lmbench_testcode.sh
     run_test_path /musl/lmbench_testcode.sh
+}
+
+run_busybox_tests() {
+    found=1
+    prepare_common_test_env
+    run_test_path /glibc/busybox_testcode.sh
+    run_test_path /musl/busybox_testcode.sh
+}
+
+run_netperf_tests() {
+    found=1
+    prepare_common_test_env
+    run_test_path /glibc/netperf_testcode.sh
+    run_test_path /musl/netperf_testcode.sh
+}
+
+run_lua_netperf_tests() {
+    found=1
+    prepare_common_test_env
+    for testcase in \
+        /glibc/lua_testcode.sh \
+        /glibc/netperf_testcode.sh \
+        /musl/lua_testcode.sh \
+        /musl/netperf_testcode.sh
+    do
+        run_test_path "$testcase"
+    done
 }
 
 run_ltp_list_libc() {
@@ -706,8 +722,20 @@ case "$TEST_PROFILE" in
     iozone)
         run_iozone_tests
         ;;
+    iozone-window)
+        run_iozone_window_tests
+        ;;
     lmbench)
         run_lmbench_tests
+        ;;
+    busybox)
+        run_busybox_tests
+        ;;
+    netperf)
+        run_netperf_tests
+        ;;
+    lua-netperf)
+        run_lua_netperf_tests
         ;;
     ltp-list)
         run_ltp_list_tests
