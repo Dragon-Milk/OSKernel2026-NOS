@@ -108,6 +108,23 @@ print(f"[OK] {label}: vendor checksum 未发现缺失或不匹配文件")
 PY
 }
 
+check_vendor_lock_tree() {
+    local tree_dir="$1"
+    local label="$2"
+    local checker="$tree_dir/tools/check-vendor-lock.sh"
+
+    if [ ! -f "$checker" ]; then
+        warn "$label: tools/check-vendor-lock.sh 不存在，跳过 Cargo.lock/vendor 精确版本检查"
+        return 0
+    fi
+
+    if bash "$checker" "$tree_dir/src"; then
+        ok "$label: Cargo.lock 中 registry crate 均有精确 vendor 版本"
+    else
+        return 1
+    fi
+}
+
 check_cargo_offline_metadata_tree() {
     local tree_dir="$1"
     local label="$2"
@@ -130,9 +147,12 @@ check_cargo_offline_metadata_tree() {
 
         say "[cargo metadata] $label: ${manifest#$tree_dir/}"
 
+        local cargo_home
+        cargo_home="$(mktemp -d "$TMP_ROOT/cargo-home.XXXXXX")"
+
         if (
             cd "$(dirname "$manifest")" &&
-            CARGO_NET_OFFLINE=true cargo metadata --offline --format-version 1 --manifest-path "$manifest" >/dev/null
+            CARGO_HOME="$cargo_home" CARGO_NET_OFFLINE=true cargo metadata --offline --locked --format-version 1 --manifest-path "$manifest" >/dev/null
         ) >"$log" 2>&1; then
             ok "$label: ${manifest#$tree_dir/} 离线依赖解析通过"
         else
@@ -268,7 +288,15 @@ if [ "$rc" -ne 0 ]; then
 fi
 say
 
-say "===== 4b. worktree cargo offline metadata ====="
+say "===== 4b. worktree Cargo.lock/vendor exact match ====="
+check_vendor_lock_tree "$ROOT" "worktree"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    FAIL=$((FAIL + 1))
+fi
+say
+
+say "===== 4c. worktree cargo offline metadata ====="
 check_cargo_offline_metadata_tree "$ROOT" "worktree"
 rc=$?
 if [ "$rc" -ne 0 ]; then
@@ -289,7 +317,17 @@ else
 fi
 say
 
-say "===== 5b. HEAD clean tree cargo offline metadata ====="
+say "===== 5b. HEAD clean tree Cargo.lock/vendor exact match ====="
+if [ -d "$HEAD_TREE" ]; then
+    check_vendor_lock_tree "$HEAD_TREE" "HEAD clean tree"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        FAIL=$((FAIL + 1))
+    fi
+fi
+say
+
+say "===== 5c. HEAD clean tree cargo offline metadata ====="
 if [ -d "$HEAD_TREE" ]; then
     check_cargo_offline_metadata_tree "$HEAD_TREE" "HEAD clean tree"
     rc=$?
@@ -353,6 +391,12 @@ if [ -n "$PLATFORM_REF" ]; then
         REF_TREE="$TMP_ROOT/platform-tree"
         if export_ref_tree "$PLATFORM_REF" "$REF_TREE"; then
             check_vendor_tree_dir "$REF_TREE" "$PLATFORM_REF clean tree"
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+                FAIL=$((FAIL + 1))
+            fi
+
+            check_vendor_lock_tree "$REF_TREE" "$PLATFORM_REF clean tree"
             rc=$?
             if [ "$rc" -ne 0 ]; then
                 FAIL=$((FAIL + 1))
