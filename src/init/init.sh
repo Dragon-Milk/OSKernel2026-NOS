@@ -26,10 +26,14 @@ LTP_CASE_LIST=${LTP_CASE_LIST:-}
 LTP_TIMEOUT=${LTP_TIMEOUT:-${LTP_CASE_TIMEOUT:-45}}
 export LTP_TIMEOUT
 FULL_SAFE_SKIP_WASTE=${FULL_SAFE_SKIP_WASTE:-1}
+FULL_SAFE_TEST_TIMEOUT=${FULL_SAFE_TEST_TIMEOUT:-300}
+FULL_SAFE_NETPERF_TIMEOUT=${FULL_SAFE_NETPERF_TIMEOUT:-240}
 echo "[init] TEST_PROFILE=$TEST_PROFILE"
 echo "[init] LTP_TIMEOUT=$LTP_TIMEOUT"
 echo "[init] LTP_CASE_LIST=$LTP_CASE_LIST"
 echo "[init] FULL_SAFE_SKIP_WASTE=$FULL_SAFE_SKIP_WASTE"
+echo "[init] FULL_SAFE_TEST_TIMEOUT=$FULL_SAFE_TEST_TIMEOUT"
+echo "[init] FULL_SAFE_NETPERF_TIMEOUT=$FULL_SAFE_NETPERF_TIMEOUT"
 
 entry_name_exists() {
     file="$1"
@@ -102,6 +106,7 @@ is_leftover_command() {
     case "$1" in
         "./iperf3 -s"*|"iperf3 -s"*|"/glibc/iperf3 -s"*|"/musl/iperf3 -s"*| \
         "./netserver"*|"netserver"*|"/glibc/netserver"*|"/musl/netserver"*| \
+        "./netperf"*|"netperf"*|"/glibc/netperf"*|"/musl/netperf"*| \
         "./lmbench_all"*|"lmbench_all"*|"/glibc/lmbench_all"*|"/musl/lmbench_all"*| \
         "./pipe 10"*|"pipe 10"*|"/glibc/pipe 10"*|"/musl/pipe 10"*| \
         "./hackbench"*|"hackbench"*|"/glibc/hackbench"*|"/musl/hackbench"*| \
@@ -340,6 +345,61 @@ run_test_path() {
     cd /
 }
 
+full_safe_timeout_for() {
+    case "$1" in
+        *netperf_testcode.sh)
+            echo "$FULL_SAFE_NETPERF_TIMEOUT"
+            ;;
+        *)
+            echo "$FULL_SAFE_TEST_TIMEOUT"
+            ;;
+    esac
+}
+
+run_test_path_full_safe() {
+    script="$1"
+
+    [ -f "$script" ] || return
+
+    found=1
+    dir="${script%/*}"
+    name="${script##*/}"
+
+    cd "$dir" || return
+    set_library_path "$dir"
+    echo "run ${dir}/${name}"
+    if skip_ltp_testcase "$name" "$dir"; then
+        cd /
+        return
+    fi
+
+    timeout_secs="$(full_safe_timeout_for "$script")"
+    bb="$(busybox_cmd)"
+    case "$timeout_secs" in
+        ''|0|*[!0-9]*)
+            run_with_shell "./$name"
+            ret=$?
+            ;;
+        *)
+            if [ -n "$bb" ]; then
+                "$bb" timeout "$timeout_secs" "$bb" sh "./$name"
+                ret=$?
+            else
+                run_with_shell "./$name"
+                ret=$?
+            fi
+            ;;
+    esac
+
+    case "$ret" in
+        124|137|143)
+            echo "[full-safe] timeout after ${timeout_secs}s: ${dir}/${name}"
+            ;;
+    esac
+    needs_cleanup "$script" && cleanup_leftovers
+    cd /
+}
+
 prepare_basic_scripts() {
     for dir in /glibc /musl; do
         [ -x "$dir/busybox" ] || continue
@@ -397,7 +457,7 @@ run_full_safe_non_ltp_tests() {
                 esac
             fi
 
-            run_test_path "$testcase"
+            run_test_path_full_safe "$testcase"
         done
     done
 }
