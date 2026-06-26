@@ -196,6 +196,71 @@ cleanup_epoll_ltp_leftovers() {
     done
 }
 
+ltp_snapshot_pids() {
+    bb="$1"
+    out="$2"
+
+    : > "$out"
+    [ -n "$bb" ] || return
+
+    "$bb" ps | while read pid user time cmd; do
+        case "$pid" in ''|PID) continue ;; esac
+        printf '%s\n' "$pid"
+    done > "$out"
+}
+
+ltp_pid_was_present() {
+    pid="$1"
+    snapshot="$2"
+
+    [ -f "$snapshot" ] || return 1
+    while read old_pid; do
+        [ "$old_pid" = "$pid" ] && return 0
+    done < "$snapshot"
+    return 1
+}
+
+is_ltp_cleanup_protected_command() {
+    case "$1" in
+        ''|sh|sh\ *|*/sh|*/sh\ *|*"busybox sh"*|*"init.sh"*|*"cleanup"*|*" ps"|ps|*/ps)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+cleanup_ltp_case_leftovers_once() {
+    signal="$1"
+    bb="$2"
+    snapshot="$3"
+
+    [ -n "$bb" ] || return
+    [ -f "$snapshot" ] || return
+
+    "$bb" ps | while read pid user time cmd; do
+        case "$pid" in ''|PID|1) continue ;; esac
+        [ "$pid" = "$$" ] && continue
+        ltp_pid_was_present "$pid" "$snapshot" && continue
+        is_ltp_cleanup_protected_command "$cmd" && continue
+
+        echo "[LTP-CLEANUP] signal=$signal pid=$pid cmd=$cmd"
+        "$bb" kill "$signal" "$pid" >/dev/null 2>&1 || true
+    done
+}
+
+cleanup_ltp_case_leftovers() {
+    bb="$1"
+    snapshot="$2"
+
+    [ -n "$bb" ] || return
+    [ -f "$snapshot" ] || return
+
+    cleanup_ltp_case_leftovers_once -TERM "$bb" "$snapshot"
+    "$bb" sleep 1
+    cleanup_ltp_case_leftovers_once -KILL "$bb" "$snapshot"
+    "$bb" rm -f "$snapshot" 2>/dev/null || true
+}
+
 skip_ltp_testcase() {
     name="$1"
     dir="$2"
@@ -615,29 +680,35 @@ run_ltp_cases_libc() {
 
         if [ "$name" = "epoll-ltp" ]; then
             echo "RUN LTP CASE $name"
+            snapshot="/tmp/ltp-pids-$$-$name"
+            ltp_snapshot_pids "$bb" "$snapshot"
+            ret=0
             if [ -n "$bb" ]; then
-                "$bb" timeout 300 "$file"
+                "$bb" timeout 300 "$file" </dev/null || ret=$?
             else
-                "$file"
+                "$file" </dev/null || ret=$?
             fi
-            ret=$?
             echo "FAIL LTP CASE $name : $ret"
             # epoll-ltp spawns children (epoll01 etc.) that survive
             # timeout/termination and pollute subsequent cases with
             # interleaved output and resource contention.
             cleanup_epoll_ltp_leftovers "$bb"
+            cleanup_ltp_case_leftovers "$bb" "$snapshot"
             continue
         fi
 
         echo "RUN LTP CASE $name"
+        snapshot="/tmp/ltp-pids-$$-$name"
+        ltp_snapshot_pids "$bb" "$snapshot"
 
+        ret=0
         if [ -n "$bb" ]; then
-            "$bb" timeout "$case_timeout" /tmp/ltpw "$file"
+            "$bb" timeout "$case_timeout" /tmp/ltpw "$file" </dev/null || ret=$?
         else
-            LTP_TIMEOUT="$case_timeout" "$file"
+            LTP_TIMEOUT="$case_timeout" "$file" </dev/null || ret=$?
         fi
-        ret=$?
         echo "FAIL LTP CASE $name : $ret"
+        cleanup_ltp_case_leftovers "$bb" "$snapshot"
     done
 
     echo "#### OS COMP TEST GROUP END $group ####"
