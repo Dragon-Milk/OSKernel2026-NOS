@@ -556,9 +556,9 @@ run_ltp_cases_libc() {
         echo "RUN LTP CASE $name"
 
         if [ -n "$bb" ]; then
-            "$bb" timeout "$case_timeout" /tmp/ltpw "$file"
+            "$bb" timeout "$case_timeout" /tmp/ltpw "$file" < /dev/null
         else
-            LTP_TIMEOUT="$case_timeout" "$file"
+            LTP_TIMEOUT="$case_timeout" "$file" < /dev/null
         fi
         ret=$?
         echo "FAIL LTP CASE $name : $ret"
