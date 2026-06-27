@@ -22,11 +22,13 @@ export PATH=$BASE_PATH
 # ============================================================
 SKIP_LTP=${SKIP_LTP:-0}
 TEST_PROFILE=${TEST_PROFILE:-full-safe}
+LTP_LIBC=${LTP_LIBC:-both}
 LTP_CASE_LIST=${LTP_CASE_LIST:-}
 LTP_TIMEOUT=${LTP_TIMEOUT:-${LTP_CASE_TIMEOUT:-45}}
 export LTP_TIMEOUT
 FULL_SAFE_SKIP_WASTE=${FULL_SAFE_SKIP_WASTE:-1}
 echo "[init] TEST_PROFILE=$TEST_PROFILE"
+echo "[init] LTP_LIBC=$LTP_LIBC"
 echo "[init] LTP_TIMEOUT=$LTP_TIMEOUT"
 echo "[init] LTP_CASE_LIST=$LTP_CASE_LIST"
 echo "[init] FULL_SAFE_SKIP_WASTE=$FULL_SAFE_SKIP_WASTE"
@@ -473,29 +475,29 @@ run_ltp_list_tests() {
     run_ltp_list_libc musl /musl/ltp/testcases/bin
 }
 
-run_ltp_cases_libc() {
+run_ltp_safe_libc() {
     libc="$1"
 
     case "$libc" in
         glibc) dir=/glibc ;;
         musl)  dir=/musl ;;
         *)
-            echo "[LTP-ERROR] unsupported libc: $libc"
+            echo "[LTP-SAFE-ERROR] unsupported libc: $libc"
             return
             ;;
     esac
 
-    echo "[LTP] libc=$libc dir=$dir"
+    echo "[LTP-SAFE] libc=$libc dir=$dir"
 
     target_dir="$dir/ltp/testcases/bin"
 
     if [ ! -d "$target_dir" ]; then
-        echo "[LTP-ERROR] directory not found: $target_dir"
+        echo "[LTP-SAFE-ERROR] directory not found: $target_dir"
         return
     fi
 
     if ! cd "$dir"; then
-        echo "[LTP-ERROR] cannot cd to $dir"
+        echo "[LTP-SAFE-ERROR] cannot cd to $dir"
         return
     fi
 
@@ -520,15 +522,23 @@ run_ltp_cases_libc() {
     echo "#### OS COMP TEST GROUP START $group ####"
 
     if [ -n "$LTP_CASE_LIST" ]; then
-        echo "[LTP] explicit case-list: $LTP_CASE_LIST" >&2
+        echo "[LTP-SAFE] explicit case-list: $LTP_CASE_LIST" >&2
     fi
 
-    ltp_case_list | while IFS= read -r name; do
+    list_file="/tmp/ltp-case-list-$libc"
+    if ! ltp_case_list > "$list_file"; then
+        echo "[LTP-SAFE-ERROR] cannot prepare case-list: $list_file"
+        echo "#### OS COMP TEST GROUP END $group ####"
+        cd /
+        return
+    fi
+
+    while IFS= read -r name || [ -n "$name" ]; do
         [ -n "$name" ] || continue
         file="ltp/testcases/bin/$name"
 
         if [ ! -f "$file" ]; then
-            echo "[LTP-MISSING] $libc $name: $dir/$file"
+            echo "[LTP-SAFE-MISSING] $libc $name: $dir/$file"
             continue
         fi
 
@@ -540,9 +550,9 @@ run_ltp_cases_libc() {
         if [ "$name" = "epoll-ltp" ]; then
             echo "RUN LTP CASE $name"
             if [ -n "$bb" ]; then
-                "$bb" timeout 300 "$file"
+                "$bb" timeout 300 "$file" < /dev/null
             else
-                "$file"
+                "$file" < /dev/null
             fi
             ret=$?
             echo "FAIL LTP CASE $name : $ret"
@@ -562,7 +572,7 @@ run_ltp_cases_libc() {
         fi
         ret=$?
         echo "FAIL LTP CASE $name : $ret"
-    done
+    done < "$list_file"
 
     echo "#### OS COMP TEST GROUP END $group ####"
 
@@ -571,8 +581,19 @@ run_ltp_cases_libc() {
 
 run_ltp_safe_tests() {
     found=1
-    run_ltp_cases_libc glibc
-    run_ltp_cases_libc musl
+
+    case "$LTP_LIBC" in
+        glibc|musl)
+            run_ltp_safe_libc "$LTP_LIBC"
+            ;;
+        both)
+            run_ltp_safe_libc glibc
+            run_ltp_safe_libc musl
+            ;;
+        *)
+            echo "[LTP-SAFE-ERROR] unsupported libc: $LTP_LIBC"
+            ;;
+    esac
 }
 
 run_lmbench_write_tests() {

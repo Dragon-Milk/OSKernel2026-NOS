@@ -14,6 +14,7 @@ export VSOCK := n
 export MEM := 1G
 export ICOUNT := n
 export TEST_PROFILE ?= full-safe
+export LTP_LIBC ?= both
 export LTP_CASE_LIST ?=
 
 # Generated Options
@@ -79,6 +80,7 @@ clean:
 build run debug disasm: defconfig
 	@{ \
 		printf 'pub const TEST_PROFILE_ENV: &str = r###"TEST_PROFILE=%s"###;\n' "$(TEST_PROFILE)"; \
+		printf 'pub const LTP_LIBC_ENV: &str = r###"LTP_LIBC=%s"###;\n' "$(LTP_LIBC)"; \
 		printf 'pub const LTP_TIMEOUT_ENV: &str = r###"LTP_TIMEOUT=%s"###;\n' "$(LTP_TIMEOUT)"; \
 		printf 'pub const LTP_CASE_LIST_ENV: &str = r###"LTP_CASE_LIST=%s"###;\n' "$(LTP_CASE_LIST)"; \
 	} > init/env.rs.tmp

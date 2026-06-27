@@ -12,7 +12,7 @@ export CARGO_NET_OFFLINE := true
 
 # Shared flags forwarded to inner src/ builds.
 # $(MAKE) inherits environment variables and MAKEFLAGS automatically,
-# so TEST_PROFILE, LTP_CASE_LIST, LTP_TIMEOUT, FULL_SAFE_SKIP_WASTE,
+# so TEST_PROFILE, LTP_LIBC, LTP_CASE_LIST, LTP_TIMEOUT, FULL_SAFE_SKIP_WASTE,
 # NS_DURATION flow through without extra work.
 SRC_MAKE_ARGS := A=$(SRC_DIR) TARGET_DIR=$(SRC_DIR)/target
 
