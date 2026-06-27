@@ -12,6 +12,7 @@ repository = "https://github.com/arceos-org/arceos/tree/main/modules/axtask"
 default = []
 
 multitask = [
+    "dep:axalloc",
     "dep:axconfig",
     "dep:axpoll",
     "dep:axsched",
@@ -39,6 +40,7 @@ sched-cfs = ["multitask", "preempt"]
 test = ["percpu?/sp-naive"]
 
 [dependencies]
+axalloc = { workspace = true, optional = true }
 axconfig = { workspace = true, optional = true }
 axerrno.workspace = true
 axhal.workspace = true

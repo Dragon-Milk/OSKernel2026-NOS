@@ -30,6 +30,7 @@ repository = "https://github.com/arceos-org/arceos/tree/main/modules/axtask"
 default = []
 irq = ["axhal/irq"]
 multitask = [
+    "dep:axalloc",
     "dep:axconfig",
     "dep:axpoll",
     "dep:axsched",
@@ -66,6 +67,10 @@ tls = ["axhal/tls"]
 [lib]
 name = "axtask"
 path = "src/lib.rs"
+
+[dependencies.axalloc]
+version = "=0.3.0-preview.2"
+optional = true
 
 [dependencies.axconfig]
 version = "=0.3.0-preview.2"

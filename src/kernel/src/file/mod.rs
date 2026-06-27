@@ -346,6 +346,23 @@ pub fn add_file_like(f: Arc<dyn FileLike>, cloexec: bool) -> AxResult<c_int> {
     Ok(table.add(fd).map_err(|_| AxError::TooManyOpenFiles)? as c_int)
 }
 
+/// Removes `fd` from the current process only if it still refers to `expected`.
+pub(crate) fn remove_file_like_if(fd: c_int, expected: &Arc<dyn FileLike>) -> bool {
+    let Ok(fd) = usize::try_from(fd) else {
+        return false;
+    };
+    let mut table = FD_TABLE.write();
+    if table
+        .get(fd)
+        .is_some_and(|entry| Arc::ptr_eq(&entry.inner, expected))
+    {
+        table.remove(fd);
+        true
+    } else {
+        false
+    }
+}
+
 /// Add a file to the descriptor table at the first free fd >= `min_fd`.
 pub fn add_file_like_from(
     f: Arc<dyn FileLike>,

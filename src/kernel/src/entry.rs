@@ -78,7 +78,7 @@ pub fn init(cmdlines: &[&[&str]], envs: &[&str]) {
 
     // step4: 构造用户上下文
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
-    let mut task = new_user_task(name, uctx, 0);
+    let mut task = new_user_task(name, uctx, 0).expect("Failed to allocate init task");
     task.ctx_mut().set_page_table_root(uspace.page_table_root());
 
     // step5: 初始化进程/线程数据结构

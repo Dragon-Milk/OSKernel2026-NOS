@@ -128,9 +128,17 @@ impl TaskInner {
     where
         F: FnOnce() + Send + 'static,
     {
+        Self::try_new(entry, name, stack_size).expect("failed to allocate task stack")
+    }
+
+    /// Create a new task, returning `None` if its kernel stack cannot be allocated.
+    pub fn try_new<F>(entry: F, name: String, stack_size: usize) -> Option<Self>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let kstack = TaskStack::alloc(align_up_4k(stack_size))?;
         let mut t = Self::new_common(TaskId::new(), name);
         debug!("new task: {}", t.id_name());
-        let kstack = TaskStack::alloc(align_up_4k(stack_size));
 
         #[cfg(feature = "tls")]
         let tls = VirtAddr::from(t.tls.tls_ptr() as usize);
@@ -144,7 +152,7 @@ impl TaskInner {
         if t.name() == "idle" {
             t.is_idle = true;
         }
-        t
+        Some(t)
     }
 
     /// Gets the ID of the task.
@@ -460,12 +468,12 @@ struct TaskStack {
 }
 
 impl TaskStack {
-    pub fn alloc(size: usize) -> Self {
-        let layout = Layout::from_size_align(size, 16).unwrap();
-        Self {
-            ptr: NonNull::new(unsafe { alloc::alloc::alloc(layout) }).unwrap(),
+    pub fn alloc(size: usize) -> Option<Self> {
+        let layout = Layout::from_size_align(size, 16).ok()?;
+        Some(Self {
+            ptr: axalloc::global_allocator().alloc(layout).ok()?,
             layout,
-        }
+        })
     }
 
     pub const fn top(&self) -> VirtAddr {
@@ -475,7 +483,7 @@ impl TaskStack {
 
 impl Drop for TaskStack {
     fn drop(&mut self) {
-        unsafe { alloc::alloc::dealloc(self.ptr.as_ptr(), self.layout) }
+        axalloc::global_allocator().dealloc(self.ptr, self.layout)
     }
 }
 

@@ -256,6 +256,12 @@ impl fmt::Debug for Process {
 /// Builder
 impl Process {
     fn new(pid: Pid, parent: Option<Arc<Process>>) -> Arc<Process> {
+        let process = Self::new_unregistered(pid, parent);
+        process.register();
+        process
+    }
+
+    fn new_unregistered(pid: Pid, parent: Option<Arc<Process>>) -> Arc<Process> {
         let group = parent.as_ref().map_or_else(
             || {
                 let session = Session::new(pid);
@@ -273,15 +279,17 @@ impl Process {
             group: SpinNoIrq::new(group.clone()),
         });
 
-        group.processes.lock().insert(pid, &process);
-
-        if let Some(parent) = parent {
-            parent.children.lock().insert(pid, process.clone());
-        } else {
-            INIT_PROC.init_once(process.clone());
-        }
-
         process
+    }
+
+    fn register(self: &Arc<Self>) {
+        self.group().processes.lock().insert(self.pid, self);
+
+        if let Some(parent) = self.parent() {
+            parent.children.lock().insert(self.pid, self.clone());
+        } else {
+            INIT_PROC.init_once(self.clone());
+        }
     }
 
     /// Creates a init [`Process`].
@@ -295,6 +303,19 @@ impl Process {
     /// Creates a child [`Process`].
     pub fn fork(self: &Arc<Process>, pid: Pid) -> Arc<Process> {
         Self::new(pid, Some(self.clone()))
+    }
+
+    /// Creates a child without registering it in its process group or parent.
+    #[cfg(feature = "deferred-fork")]
+    pub fn fork_unregistered(self: &Arc<Process>, pid: Pid) -> Arc<Process> {
+        Self::new_unregistered(pid, Some(self.clone()))
+    }
+
+    /// Registers a child created by [`Self::fork_unregistered`].
+    #[cfg(feature = "deferred-fork")]
+    pub fn register_fork(self: &Arc<Process>) {
+        assert!(self.parent().is_some(), "fork child has no parent");
+        self.register();
     }
 }
 

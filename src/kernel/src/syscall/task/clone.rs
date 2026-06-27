@@ -13,7 +13,7 @@ use starry_signal::Signo;
 use starry_vm::VmMutPtr;
 
 use crate::{
-    file::{FD_TABLE, FileLike, PidFd},
+    file::{FD_TABLE, FileLike, PidFd, add_file_like, remove_file_like_if},
     mm::copy_from_kernel,
     syscall::current_uts_state,
     task::{AsThread, ProcessData, Thread, add_task_to_table, new_user_task},
@@ -192,18 +192,15 @@ impl CloneArgs {
         let curr = current();
         let old_proc_data = &curr.as_thread().proc_data;
 
-        let mut new_task = new_user_task(&curr.name(), new_uctx, set_child_tid);
+        let mut new_task = new_user_task(&curr.name(), new_uctx, set_child_tid)?;
 
         let tid = new_task.id().as_u64() as Pid;
-        if flags.contains(CloneFlags::PARENT_SETTID) && parent_tid != 0 {
-            (parent_tid as *mut Pid).vm_write(tid).ok();
-        }
 
-        let new_proc_data = if flags.contains(CloneFlags::THREAD) {
+        let (new_proc_data, register_process) = if flags.contains(CloneFlags::THREAD) {
             new_task
                 .ctx_mut()
                 .set_page_table_root(old_proc_data.aspace.lock().page_table_root());
-            old_proc_data.clone()
+            (old_proc_data.clone(), false)
         } else {
             let aspace = if flags.contains(CloneFlags::VM) {
                 old_proc_data.aspace.clone()
@@ -230,7 +227,7 @@ impl CloneArgs {
             } else {
                 old_proc_data.proc.clone()
             };
-            let proc = parent_proc.fork(tid);
+            let proc = parent_proc.fork_unregistered(tid);
 
             let proc_data = ProcessData::new(
                 proc,
@@ -278,10 +275,8 @@ impl CloneArgs {
                 }
             }
 
-            proc_data
+            (proc_data, true)
         };
-
-        new_proc_data.proc.add_thread(tid);
 
         let thr = Thread::new(tid, new_proc_data.clone());
         let old_thread = curr.as_thread();
@@ -296,15 +291,26 @@ impl CloneArgs {
             thr.set_clear_child_tid(child_tid);
         }
         if flags.contains(CloneFlags::PIDFD) && pidfd != 0 {
-            let pidfd_obj = if flags.contains(CloneFlags::THREAD) {
+            let pidfd_obj: Arc<dyn FileLike> = Arc::new(if flags.contains(CloneFlags::THREAD) {
                 PidFd::new_thread(&thr)
             } else {
                 PidFd::new_process(&new_proc_data)
-            };
-            let fd = pidfd_obj.add_to_fd_table(true)?;
-            (pidfd as *mut i32).vm_write(fd)?;
+            });
+            let fd = add_file_like(pidfd_obj.clone(), true)?;
+            if let Err(err) = (pidfd as *mut i32).vm_write(fd) {
+                let _ = remove_file_like_if(fd, &pidfd_obj);
+                return Err(err.into());
+            }
         }
         *new_task.task_ext_mut() = Some(AxTaskExt::from_impl(thr));
+
+        new_proc_data.proc.add_thread(tid);
+        if register_process {
+            new_proc_data.proc.register_fork();
+        }
+        if flags.contains(CloneFlags::PARENT_SETTID) && parent_tid != 0 {
+            (parent_tid as *mut Pid).vm_write(tid).ok();
+        }
 
         let task = spawn_task(new_task);
         add_task_to_table(&task);

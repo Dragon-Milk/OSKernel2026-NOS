@@ -1,3 +1,4 @@
+use axerrno::{AxError, AxResult};
 use axhal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use axtask::TaskInner;
 use starry_process::Pid;
@@ -10,8 +11,12 @@ use super::{
 use crate::syscall::handle_syscall;
 
 /// Create a new user task.
-pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) -> TaskInner {
-    TaskInner::new(
+pub fn new_user_task(
+    name: &str,
+    mut uctx: UserContext,
+    set_child_tid: usize,
+) -> AxResult<TaskInner> {
+    TaskInner::try_new(
         move || {
             let curr = axtask::current();
 
@@ -79,4 +84,5 @@ pub fn new_user_task(name: &str, mut uctx: UserContext, set_child_tid: usize) ->
         name.into(),
         crate::config::KERNEL_STACK_SIZE,
     )
+    .ok_or(AxError::NoMemory)
 }
