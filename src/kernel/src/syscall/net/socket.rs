@@ -1,3 +1,5 @@
+use alloc::sync::Arc;
+
 use axerrno::{AxError, AxResult, LinuxError};
 #[cfg(feature = "vsock")]
 use axnet::vsock::{VsockSocket, VsockStreamTransport};
@@ -15,10 +17,11 @@ use linux_raw_sys::{
         SOCK_DGRAM, SOCK_SEQPACKET, SOCK_STREAM, sockaddr, socklen_t,
     },
 };
+use starry_vm::VmMutPtr;
 
 use super::addr::SocketAddrExt;
 use crate::{
-    file::{FileLike, Socket},
+    file::{FileLike, Socket, add_file_like, remove_file_like_if},
     mm::{UserConstPtr, UserPtr},
     task::AsThread,
 };
@@ -165,7 +168,7 @@ pub fn sys_socketpair(
     let pid = current().as_thread().proc_data.proc.pid();
     let (sock1, sock2) = match ty {
         SOCK_STREAM => {
-            let (sock1, sock2) = StreamTransport::new_pair(pid);
+            let (sock1, sock2) = StreamTransport::try_new_pair(pid)?;
             (UnixSocket::new(sock1), UnixSocket::new(sock2))
         }
         SOCK_DGRAM | SOCK_SEQPACKET => {
@@ -186,9 +189,24 @@ pub fn sys_socketpair(
     }
     let cloexec = raw_ty & O_CLOEXEC != 0;
 
-    *fds.get_as_mut()? = [
-        sock1.add_to_fd_table(cloexec)?,
-        sock2.add_to_fd_table(cloexec)?,
-    ];
+    let sock1: Arc<dyn FileLike> = Arc::new(sock1);
+    let sock2: Arc<dyn FileLike> = Arc::new(sock2);
+    let fd1 = add_file_like(sock1.clone(), cloexec)?;
+    let fd2 = match add_file_like(sock2.clone(), cloexec) {
+        Ok(fd) => fd,
+        Err(err) => {
+            remove_file_like_if(fd1, &sock1);
+            return Err(err);
+        }
+    };
+    if let Err(err) = fds
+        .address()
+        .as_mut_ptr_of::<[i32; 2]>()
+        .vm_write([fd1, fd2])
+    {
+        remove_file_like_if(fd1, &sock1);
+        remove_file_like_if(fd2, &sock2);
+        return Err(err.into());
+    }
     Ok(0)
 }

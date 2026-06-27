@@ -9,6 +9,7 @@ homepage.workspace = true
 repository = "https://github.com/arceos-org/arceos/tree/main/modules/axnet"
 
 [features]
+fallible-unix-stream = []
 vsock = ["axdriver/vsock"]
 
 [dependencies]

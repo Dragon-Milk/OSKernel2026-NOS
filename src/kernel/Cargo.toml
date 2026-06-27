@@ -42,7 +42,7 @@ axhal.workspace = true
 axinput = { workspace = true, optional = true }
 axlog.workspace = true
 axmm.workspace = true
-axnet.workspace = true
+axnet = { workspace = true, features = ["fallible-unix-stream"] }
 axruntime.workspace = true
 axsync.workspace = true
 axtask.workspace = true

@@ -21,17 +21,17 @@ use crate::{
     unix::{Transport, TransportOps, UnixSocketAddr},
 };
 
-const BUF_SIZE: usize = 64 * 1024;
+const BUF_SIZE: usize = 4 * 1024;
 
-fn new_uni_channel() -> (HeapProd<u8>, HeapCons<u8>) {
-    let rb = HeapRb::new(BUF_SIZE);
-    rb.split()
+fn try_new_uni_channel() -> AxResult<(HeapProd<u8>, HeapCons<u8>)> {
+    let rb = HeapRb::try_new(BUF_SIZE).map_err(|_| AxError::NoMemory)?;
+    Ok(rb.split())
 }
-fn new_channels(pid: u32) -> (Channel, Channel) {
-    let (client_tx, server_rx) = new_uni_channel();
-    let (server_tx, client_rx) = new_uni_channel();
+fn try_new_channels(pid: u32) -> AxResult<(Channel, Channel)> {
+    let (client_tx, server_rx) = try_new_uni_channel()?;
+    let (server_tx, client_rx) = try_new_uni_channel()?;
     let poll_update = Arc::new(PollSet::new());
-    (
+    Ok((
         Channel {
             tx: client_tx,
             rx: client_rx,
@@ -44,7 +44,7 @@ fn new_channels(pid: u32) -> (Channel, Channel) {
             poll_update,
             peer_pid: pid,
         },
-    )
+    ))
 }
 
 struct Channel {
@@ -63,7 +63,7 @@ pub struct Bind {
 }
 impl Bind {
     fn connect(&self, local_addr: UnixSocketAddr, pid: u32) -> AxResult<Channel> {
-        let (mut client_chan, mut server_chan) = new_channels(0);
+        let (mut client_chan, mut server_chan) = try_new_channels(0)?;
         client_chan.peer_pid = self.pid;
         server_chan.peer_pid = pid;
         self.conn_tx
@@ -112,12 +112,13 @@ impl StreamTransport {
         }
     }
 
-    /// Create a connected pair of stream transports.
-    pub fn new_pair(pid: u32) -> (Self, Self) {
-        let (chan1, chan2) = new_channels(pid);
+    /// Try to create a connected pair of stream transports.
+    #[cfg(feature = "fallible-unix-stream")]
+    pub fn try_new_pair(pid: u32) -> AxResult<(Self, Self)> {
+        let (chan1, chan2) = try_new_channels(pid)?;
         let transport1 = StreamTransport::new_channel(Some(chan1), pid);
         let transport2 = StreamTransport::new_channel(Some(chan2), pid);
-        (transport1, transport2)
+        Ok((transport1, transport2))
     }
 }
 
