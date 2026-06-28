@@ -158,13 +158,6 @@ fn check_kill_permission(pid: Pid, sig: &Option<SignalInfo>) -> AxResult<()> {
 }
 
 pub fn sys_kill(pid: i32, signo: u32) -> AxResult<isize> {
-    warn!("[timer2-debug] sys_kill enter pid={pid} signo={signo}");
-    let result = do_sys_kill(pid, signo);
-    warn!("[timer2-debug] sys_kill return pid={pid} signo={signo} result={result:?}");
-    result
-}
-
-fn do_sys_kill(pid: i32, signo: u32) -> AxResult<isize> {
     debug!("sys_kill: pid = {pid}, signo = {signo}");
     let sig = make_siginfo(signo, SI_USER as _)?;
 
@@ -222,13 +215,6 @@ fn do_sys_kill(pid: i32, signo: u32) -> AxResult<isize> {
 }
 
 pub fn sys_tkill(tid: Pid, signo: u32) -> AxResult<isize> {
-    warn!("[timer2-debug] sys_tkill enter tid={tid} signo={signo}");
-    let result = do_sys_tkill(tid, signo);
-    warn!("[timer2-debug] sys_tkill return tid={tid} signo={signo} result={result:?}");
-    result
-}
-
-fn do_sys_tkill(tid: Pid, signo: u32) -> AxResult<isize> {
     if tid == Pid::MAX {
         return Err(AxError::InvalidInput);
     }
@@ -244,15 +230,6 @@ fn do_sys_tkill(tid: Pid, signo: u32) -> AxResult<isize> {
 }
 
 pub fn sys_tgkill(tgid: i32, tid: i32, signo: u32) -> AxResult<isize> {
-    warn!("[timer2-debug] sys_tgkill enter tgid={tgid} tid={tid} signo={signo}");
-    let result = do_sys_tgkill(tgid, tid, signo);
-    warn!(
-        "[timer2-debug] sys_tgkill return tgid={tgid} tid={tid} signo={signo} result={result:?}"
-    );
-    result
-}
-
-fn do_sys_tgkill(tgid: i32, tid: i32, signo: u32) -> AxResult<isize> {
     if tgid <= 0 || tid <= 0 {
         return Err(AxError::InvalidInput);
     }

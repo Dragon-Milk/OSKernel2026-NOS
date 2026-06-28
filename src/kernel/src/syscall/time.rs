@@ -349,55 +349,36 @@ pub fn sys_timer_create(
     sevp: *const sigevent,
     timerid: *mut i32,
 ) -> AxResult<isize> {
-    let (pid, tid) = {
-        let curr = current();
-        (curr.as_thread().proc_data.proc.pid(), curr.id().as_u64())
-    };
-    warn!(
-        "[timer2-debug] timer_create enter pid={pid} tid={tid} clock_id={clock_id} sevp={sevp:p} timerid_ptr={timerid:p}"
-    );
-
-    let result: AxResult<isize> = (|| {
-        let _ = timer_clock_now(clock_id)?;
-        let signo = if sevp.is_null() {
+    let _ = timer_clock_now(clock_id)?;
+    let signo = if sevp.is_null() {
+        Signo::SIGALRM as u8
+    } else {
+        let event = unsafe { sevp.vm_read_uninit()?.assume_init() };
+        if event.sigev_notify == 1 {
+            0
+        } else if event.sigev_signo == 0 {
             Signo::SIGALRM as u8
         } else {
-            let event = unsafe { sevp.vm_read_uninit()?.assume_init() };
-            if event.sigev_notify == 1 {
-                0
-            } else if event.sigev_signo == 0 {
-                Signo::SIGALRM as u8
-            } else {
-                event.sigev_signo as u8
-            }
-        };
-        if signo != 0 && Signo::from_repr(signo).is_none() {
-            return Err(AxError::InvalidInput);
+            event.sigev_signo as u8
         }
-
-        let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
-        POSIX_TIMERS.lock().insert(
-            id,
-            PosixTimer {
-                pid,
-                clock_id,
-                signo,
-                ..Default::default()
-            },
-        );
-        timerid.vm_write(id)?;
-        warn!(
-            "[timer2-debug] timer_create success pid={pid} tid={tid} timerid={id} clock_id={clock_id} signo={signo}"
-        );
-        Ok(0)
-    })();
-
-    if let Err(err) = &result {
-        warn!(
-            "[timer2-debug] timer_create error pid={pid} tid={tid} clock_id={clock_id} error={err:?}"
-        );
+    };
+    if signo != 0 && Signo::from_repr(signo).is_none() {
+        return Err(AxError::InvalidInput);
     }
-    result
+
+    let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    let pid = current().as_thread().proc_data.proc.pid();
+    POSIX_TIMERS.lock().insert(
+        id,
+        PosixTimer {
+            pid,
+            clock_id,
+            signo,
+            ..Default::default()
+        },
+    );
+    timerid.vm_write(id)?;
+    Ok(0)
 }
 
 pub fn sys_timer_settime(
@@ -406,110 +387,23 @@ pub fn sys_timer_settime(
     new_value: *const itimerspec,
     old_value: *mut itimerspec,
 ) -> AxResult<isize> {
-    let (pid, tid) = {
-        let curr = current();
-        (curr.as_thread().proc_data.proc.pid(), curr.id().as_u64())
-    };
-    warn!(
-        "[timer2-debug] timer_settime enter pid={pid} tid={tid} timerid={timerid} flags={flags:#x} new_value={new_value:p} old_value={old_value:p}"
-    );
+    let old_timer = POSIX_TIMERS
+        .lock()
+        .get(&timerid)
+        .copied()
+        .ok_or(AxError::InvalidInput)?;
 
-    warn!("[timer2-debug] timer_settime snapshot begin timerid={timerid}");
-    let old_timer = match POSIX_TIMERS.lock().get(&timerid).copied() {
-        Some(timer) => {
-            warn!(
-                "[timer2-debug] timer_settime snapshot success timerid={timerid} generation={} expires={} interval={}",
-                timer.generation, timer.expires_mono_ns, timer.interval_ns
-            );
-            timer
-        }
-        None => {
-            warn!("[timer2-debug] timer_settime snapshot error timerid={timerid} error=EINVAL");
-            return Err(AxError::InvalidInput);
-        }
-    };
-
-    warn!(
-        "[timer2-debug] timer_settime new_value null={} timerid={timerid}",
-        new_value.is_null()
-    );
     if new_value.is_null() {
         return Err(AxError::InvalidInput);
     }
 
-    warn!("[timer2-debug] timer_settime vm_read_uninit begin timerid={timerid}");
-    let new_value = match unsafe { new_value.vm_read_uninit() } {
-        Ok(value) => {
-            let value = unsafe { value.assume_init() };
-            warn!(
-                "[timer2-debug] timer_settime vm_read_uninit end timerid={timerid} value={}.{} interval={}.{}",
-                value.it_value.tv_sec,
-                value.it_value.tv_nsec,
-                value.it_interval.tv_sec,
-                value.it_interval.tv_nsec
-            );
-            value
-        }
-        Err(err) => {
-            warn!(
-                "[timer2-debug] timer_settime vm_read_uninit error timerid={timerid} error={err:?}"
-            );
-            return Err(err.into());
-        }
-    };
-
-    warn!("[timer2-debug] timer_settime timespec_to_nanos begin timerid={timerid}");
-    let value_ns = match timespec_to_nanos(new_value.it_value) {
-        Ok(value) => value,
-        Err(err) => {
-            warn!(
-                "[timer2-debug] timer_settime timespec_to_nanos error timerid={timerid} field=value error={err:?}"
-            );
-            return Err(err);
-        }
-    };
-    let interval_ns = match timespec_to_nanos(new_value.it_interval) {
-        Ok(value) => value,
-        Err(err) => {
-            warn!(
-                "[timer2-debug] timer_settime timespec_to_nanos error timerid={timerid} field=interval error={err:?}"
-            );
-            return Err(err);
-        }
-    };
-    warn!(
-        "[timer2-debug] timer_settime timespec_to_nanos end timerid={timerid} value_ns={value_ns} interval_ns={interval_ns}"
-    );
-
-    warn!(
-        "[timer2-debug] timer_settime timer_expiry_to_mono begin timerid={timerid} clock_id={} flags={flags:#x} value_ns={value_ns}",
-        old_timer.clock_id
-    );
-    let expires_mono_ns = match timer_expiry_to_mono(old_timer.clock_id, flags, value_ns) {
-        Ok(expires) => {
-            warn!(
-                "[timer2-debug] timer_settime timer_expiry_to_mono end timerid={timerid} expires={expires}"
-            );
-            expires
-        }
-        Err(err) => {
-            warn!(
-                "[timer2-debug] timer_settime timer_expiry_to_mono error timerid={timerid} error={err:?}"
-            );
-            return Err(err);
-        }
-    };
+    let new_value = unsafe { new_value.vm_read_uninit()?.assume_init() };
+    let value_ns = timespec_to_nanos(new_value.it_value)?;
+    let interval_ns = timespec_to_nanos(new_value.it_interval)?;
+    let expires_mono_ns = timer_expiry_to_mono(old_timer.clock_id, flags, value_ns)?;
     let mut overrun = 0;
     if flags & TIMER_ABSTIME != 0 && interval_ns != 0 {
-        let now = match timer_clock_now(old_timer.clock_id) {
-            Ok(now) => now,
-            Err(err) => {
-                warn!(
-                    "[timer2-debug] timer_settime timer_clock_now error timerid={timerid} error={err:?}"
-                );
-                return Err(err);
-            }
-        };
+        let now = timer_clock_now(old_timer.clock_id)?;
         if value_ns < now {
             let missed = (now - value_ns) / interval_ns;
             overrun = missed.min(i32::MAX as u64) as i32;
@@ -520,7 +414,7 @@ pub fn sys_timer_settime(
         let remained = old_timer
             .expires_mono_ns
             .saturating_sub(monotonic_time_nanos());
-        let old_spec = itimerspec {
+        old_value.vm_write(itimerspec {
             it_interval: timespec {
                 tv_sec: (old_timer.interval_ns / NANOS_PER_SEC) as _,
                 tv_nsec: (old_timer.interval_ns % NANOS_PER_SEC) as _,
@@ -529,28 +423,11 @@ pub fn sys_timer_settime(
                 tv_sec: (remained / NANOS_PER_SEC) as _,
                 tv_nsec: (remained % NANOS_PER_SEC) as _,
             },
-        };
-        warn!("[timer2-debug] timer_settime old_value vm_write begin timerid={timerid}");
-        if let Err(err) = old_value.vm_write(old_spec) {
-            warn!(
-                "[timer2-debug] timer_settime old_value vm_write error timerid={timerid} error={err:?}"
-            );
-            return Err(err.into());
-        }
-        warn!("[timer2-debug] timer_settime old_value vm_write end timerid={timerid}");
+        })?;
     }
 
-    warn!(
-        "[timer2-debug] timer_settime commit begin timerid={timerid} expires={expires_mono_ns} interval={interval_ns} overrun={overrun}"
-    );
     let mut timers = POSIX_TIMERS.lock();
-    let timer = match timers.get_mut(&timerid) {
-        Some(timer) => timer,
-        None => {
-            warn!("[timer2-debug] timer_settime commit error timerid={timerid} error=EINVAL");
-            return Err(AxError::InvalidInput);
-        }
-    };
+    let timer = timers.get_mut(&timerid).ok_or(AxError::InvalidInput)?;
     timer.generation = timer.generation.wrapping_add(1);
     timer.interval_ns = interval_ns;
     timer.expires_mono_ns = expires_mono_ns;
@@ -558,135 +435,50 @@ pub fn sys_timer_settime(
 
     let generation = timer.generation;
     let spawn_worker = value_ns != 0 && timer.signo != 0;
-    warn!(
-        "[timer2-debug] timer_settime commit end timerid={timerid} generation={generation} spawn_worker={spawn_worker}"
-    );
     drop(timers);
-    warn!("[timer2-debug] timer_settime lock dropped timerid={timerid}");
 
     if spawn_worker {
-        warn!(
-            "[timer2-debug] timer_settime spawn enter timerid={timerid} generation={generation}"
-        );
         axtask::spawn_with_name(move || {
-            warn!(
-                "[timer2-debug] posix-worker start timerid={timerid} generation={generation}"
-            );
             loop {
-                warn!(
-                    "[timer2-debug] posix-worker state read begin timerid={timerid} generation={generation}"
-                );
                 let expires_mono_ns = {
                     let timers = POSIX_TIMERS.lock();
                     let Some(timer) = timers.get(&timerid) else {
-                        warn!(
-                            "[timer2-debug] posix-worker state read error timerid={timerid} reason=missing"
-                        );
                         return;
                     };
-                    warn!(
-                        "[timer2-debug] posix-worker state read success timerid={timerid} expected_generation={generation} actual_generation={} expires={} interval={}",
-                        timer.generation, timer.expires_mono_ns, timer.interval_ns
-                    );
-                    if timer.generation != generation {
-                        warn!(
-                            "[timer2-debug] posix-worker exit timerid={timerid} reason=generation-mismatch expected={generation} actual={}",
-                            timer.generation
-                        );
-                        return;
-                    }
-                    if timer.expires_mono_ns == 0 {
-                        warn!(
-                            "[timer2-debug] posix-worker exit timerid={timerid} reason=disarmed"
-                        );
+                    if timer.generation != generation || timer.expires_mono_ns == 0 {
                         return;
                     }
                     timer.expires_mono_ns
                 };
 
-                let now = monotonic_time_nanos();
-                let delay = expires_mono_ns.saturating_sub(now);
-                warn!(
-                    "[timer2-debug] posix-worker sleep begin timerid={timerid} generation={generation} expires={expires_mono_ns} now={now} delta={delay}"
-                );
+                let delay = expires_mono_ns.saturating_sub(monotonic_time_nanos());
                 axtask::future::block_on(axtask::future::sleep(TimeValue::from_nanos(delay as _)));
-                warn!(
-                    "[timer2-debug] posix-worker sleep end timerid={timerid} generation={generation}"
-                );
 
-                warn!(
-                    "[timer2-debug] posix-worker post-sleep state read begin timerid={timerid} generation={generation}"
-                );
                 let mut timers = POSIX_TIMERS.lock();
                 let Some(timer) = timers.get_mut(&timerid) else {
-                    warn!(
-                        "[timer2-debug] posix-worker post-sleep state read error timerid={timerid} reason=missing"
-                    );
                     return;
                 };
-                warn!(
-                    "[timer2-debug] posix-worker post-sleep state read success timerid={timerid} expected_generation={generation} actual_generation={} expires={} interval={}",
-                    timer.generation, timer.expires_mono_ns, timer.interval_ns
-                );
-                if timer.generation != generation {
-                    warn!(
-                        "[timer2-debug] posix-worker exit timerid={timerid} reason=generation-mismatch expected={generation} actual={}",
-                        timer.generation
-                    );
+                if timer.generation != generation || timer.expires_mono_ns == 0 {
                     return;
                 }
-                if timer.expires_mono_ns == 0 {
-                    warn!("[timer2-debug] posix-worker exit timerid={timerid} reason=disarmed");
-                    return;
-                }
-                let now = monotonic_time_nanos();
-                if now < timer.expires_mono_ns {
-                    warn!(
-                        "[timer2-debug] posix-worker exit timerid={timerid} reason=early-wake now={now} expires={}",
-                        timer.expires_mono_ns
-                    );
+                if monotonic_time_nanos() < timer.expires_mono_ns {
                     return;
                 }
                 if let Some(signo) = Signo::from_repr(timer.signo) {
-                    warn!(
-                        "[timer2-debug] posix-worker signal begin timerid={timerid} pid={} signo={signo:?}",
-                        timer.pid
-                    );
-                    let result =
-                        send_signal_to_process(timer.pid, Some(SignalInfo::new_kernel(signo)));
-                    warn!(
-                        "[timer2-debug] posix-worker signal end timerid={timerid} result={result:?}"
-                    );
+                    let _ = send_signal_to_process(timer.pid, Some(SignalInfo::new_kernel(signo)));
                 }
                 if timer.interval_ns == 0 {
                     timer.expires_mono_ns = 0;
-                    warn!(
-                        "[timer2-debug] posix-worker exit timerid={timerid} reason=interval-zero"
-                    );
                     return;
                 }
-                warn!(
-                    "[timer2-debug] posix-worker rearm begin timerid={timerid} old_expires={} interval={} now={now}",
-                    timer.expires_mono_ns, timer.interval_ns
-                );
-                timer.expires_mono_ns = now.saturating_add(timer.interval_ns);
-                warn!(
-                    "[timer2-debug] posix-worker rearm end timerid={timerid} new_expires={}",
-                    timer.expires_mono_ns
-                );
+                timer.expires_mono_ns = monotonic_time_nanos().saturating_add(timer.interval_ns);
             }
         }, "posix-timer".into());
-        warn!(
-            "[timer2-debug] timer_settime spawn end timerid={timerid} generation={generation}"
-        );
         // The caller may immediately busy-wait for the timer signal. Let the
         // worker register its first sleep before returning to user space.
-        warn!("[timer2-debug] timer_settime yield begin timerid={timerid}");
         axtask::yield_now();
-        warn!("[timer2-debug] timer_settime yield end timerid={timerid}");
     }
 
-    warn!("[timer2-debug] timer_settime return Ok timerid={timerid}");
     Ok(0)
 }
 
@@ -717,29 +509,11 @@ pub fn sys_timer_getoverrun(timerid: i32) -> AxResult<isize> {
 }
 
 pub fn sys_timer_delete(timerid: i32) -> AxResult<isize> {
-    let (pid, tid) = {
-        let curr = current();
-        (curr.as_thread().proc_data.proc.pid(), curr.id().as_u64())
-    };
-    warn!("[timer2-debug] timer_delete enter pid={pid} tid={tid} timerid={timerid}");
-
-    match POSIX_TIMERS.lock().remove(&timerid) {
-        Some(timer) => {
-            warn!(
-                "[timer2-debug] timer_delete success pid={pid} tid={tid} timerid={timerid} generation={} expires={} interval={}",
-                timer.generation, timer.expires_mono_ns, timer.interval_ns
-            );
-            warn!("[timer2-debug] timer_delete return Ok timerid={timerid}");
-            Ok(0)
-        }
-        None => {
-            warn!(
-                "[timer2-debug] timer_delete error pid={pid} tid={tid} timerid={timerid} error=EINVAL"
-            );
-            warn!("[timer2-debug] timer_delete return Err timerid={timerid}");
-            Err(AxError::InvalidInput)
-        }
-    }
+    POSIX_TIMERS
+        .lock()
+        .remove(&timerid)
+        .map(|_| 0)
+        .ok_or(AxError::InvalidInput)
 }
 
 struct TimerFd {
