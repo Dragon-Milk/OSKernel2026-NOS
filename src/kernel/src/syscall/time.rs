@@ -387,33 +387,57 @@ pub fn sys_timer_settime(
     new_value: *const itimerspec,
     old_value: *mut itimerspec,
 ) -> AxResult<isize> {
+    let old_timer = POSIX_TIMERS
+        .lock()
+        .get(&timerid)
+        .copied()
+        .ok_or(AxError::InvalidInput)?;
+
     if new_value.is_null() {
         return Err(AxError::InvalidInput);
-    }
-    if let Some(old_value) = old_value.nullable() {
-        sys_timer_gettime(timerid, old_value)?;
     }
 
     let new_value = unsafe { new_value.vm_read_uninit()?.assume_init() };
     let value_ns = timespec_to_nanos(new_value.it_value)?;
     let interval_ns = timespec_to_nanos(new_value.it_interval)?;
+    let expires_mono_ns = timer_expiry_to_mono(old_timer.clock_id, flags, value_ns)?;
+    let mut overrun = 0;
+    if flags & TIMER_ABSTIME != 0 && interval_ns != 0 {
+        let now = timer_clock_now(old_timer.clock_id)?;
+        if value_ns < now {
+            let missed = (now - value_ns) / interval_ns;
+            overrun = missed.min(i32::MAX as u64) as i32;
+        }
+    }
+
+    if let Some(old_value) = old_value.nullable() {
+        let remained = old_timer
+            .expires_mono_ns
+            .saturating_sub(monotonic_time_nanos());
+        old_value.vm_write(itimerspec {
+            it_interval: timespec {
+                tv_sec: (old_timer.interval_ns / NANOS_PER_SEC) as _,
+                tv_nsec: (old_timer.interval_ns % NANOS_PER_SEC) as _,
+            },
+            it_value: timespec {
+                tv_sec: (remained / NANOS_PER_SEC) as _,
+                tv_nsec: (remained % NANOS_PER_SEC) as _,
+            },
+        })?;
+    }
 
     let mut timers = POSIX_TIMERS.lock();
     let timer = timers.get_mut(&timerid).ok_or(AxError::InvalidInput)?;
     timer.generation = timer.generation.wrapping_add(1);
     timer.interval_ns = interval_ns;
-    timer.expires_mono_ns = timer_expiry_to_mono(timer.clock_id, flags, value_ns)?;
-    timer.overrun = 0;
-    if flags & TIMER_ABSTIME != 0 && interval_ns != 0 {
-        let now = timer_clock_now(timer.clock_id)?;
-        if value_ns < now {
-            let missed = (now - value_ns) / interval_ns;
-            timer.overrun = missed.min(i32::MAX as u64) as i32;
-        }
-    }
+    timer.expires_mono_ns = expires_mono_ns;
+    timer.overrun = overrun;
 
-    if value_ns != 0 && timer.signo != 0 {
-        let generation = timer.generation;
+    let generation = timer.generation;
+    let spawn_worker = value_ns != 0 && timer.signo != 0;
+    drop(timers);
+
+    if spawn_worker {
         axtask::spawn_with_name(move || {
             loop {
                 let expires_mono_ns = {
@@ -450,6 +474,9 @@ pub fn sys_timer_settime(
                 timer.expires_mono_ns = monotonic_time_nanos().saturating_add(timer.interval_ns);
             }
         }, "posix-timer".into());
+        // The caller may immediately busy-wait for the timer signal. Let the
+        // worker register its first sleep before returning to user space.
+        axtask::yield_now();
     }
 
     Ok(0)
